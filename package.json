@@ -1,0 +1,38 @@
+{
+  "name": "gemini-web-to-api",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts serve",
+    "build": "tsc && node scripts/build-extension.mjs",
+    "build:extension": "node scripts/build-extension.mjs",
+    "version": "node scripts/sync-version.mjs",
+    "release:check": "node scripts/check-version.mjs",
+    "release:package": "npm run release:check && npm run build && node scripts/package-release.mjs",
+    "start": "node dist/cli.js serve",
+    "info": "tsx src/cli.ts info",
+    "mcp": "tsx src/mcp.ts",
+    "typecheck": "tsc --noEmit && tsc -p extension/tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "ws": "^8.18.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "@types/chrome": "^0.1.0",
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.0.0",
+    "@types/jsdom": "^21.1.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}

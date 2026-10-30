@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Gemini Local Bridge</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+<header><span class="logo">G</span><div><h1>Gemini Local Bridge</h1><p>让 Codex 继续你的 Gemini 对话</p></div></header>
+<div class="status"><span id="dot"></span><strong id="state">读取状态…</strong></div>
+<form id="settings">
+<label>本地服务地址<input id="url" type="url" required value="http://127.0.0.1:43123"></label>
+<label>配对令牌<input id="token" type="password" required autocomplete="off" placeholder="在项目中运行 npm run info 获取"></label>
+<details><summary>网页模型名称</summary><p class="hint">必须与网页实际选项对应。不会自动切换到其他模型。</p><label>3.1 pro · 日常默认<input id="pro" value="3.1 Pro" required></label><label>4 argon · UI 设计优化<input id="argon" value="4 Argon" required></label></details>
+<button type="submit">保存并连接</button>
+</form>
+<section><div class="row"><h2>当前 Gemini 页面</h2><button id="inspect" class="secondary">读取模型</button></div><p class="hint">先切换到 Gemini 标签页。首次安装后需刷新该页。</p><pre id="models">尚未读取网页模型</pre></section>
+<section><h2>最近任务</h2><pre id="job">尚无任务</pre></section>
+<p id="message" role="status"></p>
+<script src="popup.js"></script></body></html>

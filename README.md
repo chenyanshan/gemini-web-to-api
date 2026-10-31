@@ -3,7 +3,7 @@
 ## AI 辅助安装
 
 ```markdown
-请按照 https://github.com/chenyanshan/gemini-web-to-api/blob/main/docs/release-install.md 帮我安装 Gemini Local Bridge。
+请按照 https://github.com/chenyanshan/gemini-web-to-api/blob/main/docs/release-install.md 帮我安装 Gemini Local Bridge 及配套 skill。
 ```
 
 把主 Chrome 中已登录的 Gemini 网页接入本地 HTTP API 和 Codex MCP。
@@ -43,7 +43,7 @@ Release 提供 `SHA256SUMS.txt` 校验文件。安装包不包含 Node.js、运�
 | 阶段 | AI 执行 | 人需要配合 |
 | --- | --- | --- |
 | 准备环境 | 检查 Node/npm、项目目录、端口、已有服务和 MCP 配置 | 缺少 Node/Chrome 或系统限制安装时，完成相应安装或系统操作 |
-| 本地安装 | 获取源码、安装依赖、验证并构建、启动 HTTP 服务、注册 MCP | 确保有一个能持续运行本地服务的终端或进程 |
+| 本地安装 | 获取源码、安装依赖、验证并构建、启动 HTTP 服务、注册 MCP、安装配套 skill | 确保有一个能持续运行本地服务的终端或进程 |
 | 浏览器接入 | 提供真实路径、地址和逐步操作说明 | 用主 Chrome 登录、首次加载扩展、填写配对信息 |
 | 验收 | 检查连接、读取模型、验证 MCP，报告实际结果 | 新开 Codex 会话；需要真实生成验证时保持执行窗口可见 |
 | 后续使用 | 按会话和任务 ID 查询、恢复，附上明确选定的参考文件 | 登录过期时重新登录；决定是否放弃卡住的任务或重发缺失消息 |
@@ -83,6 +83,8 @@ npm run info
 
 AI 接着按下文“配置 Codex MCP”注册工具；注册不需要等待 Chrome 登录。交接给人时必须提供 `dist/extension` 的实际绝对路径，不能只给 `/absolute/path/...` 占位符。在项目根目录运行 `node -p "require('node:path').resolve('dist/extension')"` 即可取得该路径。若使用自定义数据目录或端口，服务、MCP、插件必须使用同一套配置信息。
 
+AI 还必须按 [配套 skill 安装步骤](docs/release-install.md#ai-必须安装配套-skill)，将源码中的 `skills/gemini-ui-design/` 完整安装到当前助手的技能目录（Codex 默认 `~/.codex/skills/gemini-ui-design/`，自定义 `CODEX_HOME` 时使用其下的 `skills/gemini-ui-design/`）。检查已有版本、备份差异并验证安装结果；不能只注册 MCP 或让用户自行复制。
+
 ### 第二步：人在主 Chrome 中配合
 
 1. 用你日常使用的 Chrome 配置文件打开 [Gemini](https://gemini.google.com/app)，完成 Google 登录和必要验证。无需无痕；AI 的自动化浏览器通常是另一份配置文件，不能复用你的登录。
@@ -91,7 +93,7 @@ AI 接着按下文“配置 Codex MCP”注册工具；注册不需要等待 Chr
 4. 点击 Chrome 工具栏的扩展图标，打开 **Gemini Local Bridge**；可先将它固定到工具栏。
 5. 填入 `npm run info` 显示的**服务地址**和**插件配对令牌**，点击“保存并连接”。等到状态显示“已连接本地服务”。
 6. 回到 Gemini 标签页。如果这页在安装扩展前已经打开，刷新一次；保持 Gemini 为当前标签页，再打开插件并点“读取模型”。确认能看到网页实际的模型列表。若尚未登录或读不到模型，把插件错误文字告诉 AI。
-7. 告诉 AI“已连接、已读取模型”，让它继续验收；新开一个 Codex 会话加载新增的 MCP 工具。
+7. 告诉 AI“已连接、已读取模型”，让它继续验收；新开一个 Codex 会话加载新增的 MCP 工具和 `gemini-ui-design` skill。
 
 首次安装完成后无需每次重复加载扩展或填写令牌。账号登录操作由人直接在 Google 页面完成；插件不导出 Cookie。
 
@@ -105,11 +107,12 @@ AI 接着按下文“配置 Codex MCP”注册工具；注册不需要等待 Chr
 | Chrome 配对 | 同一响应中 `browserConnected: true`，且能读取扩展版本 |
 | 网页控件 | `/api/models` 或 `gemini_models_list` 的 `verified: true`，列表包含账号可用的目标模型；服务/插件重连后可能需重新读取 |
 | MCP 注册 | `codex mcp get gemini-web` 指向当前构建的 `dist/mcp.js`，运行程序是可用的 Node |
+| 配套 skill | 实际安装目录中 `SKILL.md` 可读且与本次版本一致，新会话技能列表中可见 `gemini-ui-design` |
 | MCP 实际加载 | 新 Codex 会话能调用 `gemini_status` 并得到服务状态，而不只是配置文件里有一条记录 |
 
 上述检查证明接入可用；真实发送与回复读取需生成测试验证。若安装任务已包含真实验证，继续做一次小型 UI 提问；否则在交付中注明“未消耗额度测试生成”，由使用者决定何时执行。验证脚本见“验证记录”，默认用 Pro，不用额度较少的 Argon 做安装测试。任务必须到 `completed` 才能算生成成功；超时后查询同一个 job_id，不新建请求重复测试。
 
-AI 最后应交付：项目路径、服务启动方法、扩展连接状态、MCP 注册和实际加载情况、是否做过真实生成，以及尚需人完成的具体步骤。若当前 AI 会话无法加载刚新增的 MCP 工具，明确注明“已注册，待新会话验证”。
+AI 最后应交付：项目路径、服务启动方法、扩展连接状态、MCP 注册和实际加载情况、skill 安装绝对路径及加载情况、是否做过真实生成，以及尚需人完成的具体步骤。若当前 AI 会话无法加载刚新增的 MCP 工具，明确注明“已注册，待新会话验证”。skill 尚未加载时也应单独注明；未安装配套 skill 不能宣称完整安装成功。
 
 ## 配置 Codex MCP
 

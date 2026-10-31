@@ -14,6 +14,8 @@ Release 不包含 Node.js 或 node_modules，首次安装运行依赖需要联�
 
 ## AI 执行
 
+先检查环境和已有安装，保留原 `.data` 和其他 MCP 配置。默认下载最新稳定 Release 的 runtime 包，按下文校验 SHA-256 后安装；已有源码目录或用户明确要求源码安装时，按 [README](https://github.com/chenyanshan/gemini-web-to-api/blob/main/README.md#交给-ai-安装) 的源码流程执行。
+
 解压 runtime 包，进入 `gemini-web-to-api-X.Y.Z` 目录：
 
 ```sh

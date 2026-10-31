@@ -1,38 +1,6 @@
 # Gemini Local Bridge
 
-## 复制给 AI：安装并使用
-
-点击下面代码块右上角的复制按钮，直接粘贴给能操作本机终端的 Codex 或其他 AI 助手。AI 会完成本地安装，并在需要时提示你操作 Chrome。
-
-```text
-请帮我在本机安装并使用 Gemini Local Bridge：
-https://github.com/chenyanshan/gemini-web-to-api
-
-先阅读仓库 README 和安装指南，检查环境及已有安装，保留原 .data 和其他 MCP 配置。
-默认安装最新稳定 Release 的 runtime 包，校验 SHA-256，安装生产依赖；
-如果已有源码目录或我明确要求源码安装，就按 README 安装依赖、验证并构建。
-启动并确认本地 HTTP 服务持续运行，用实际的 Node 和脚本绝对路径配置 STDIO MCP。
-不要只给我安装教程，请完成你能独立执行的步骤，再一次性列出需要我配合的操作。
-
-使用我日常 Chrome 的登录环境，不要改用无痕或自动化浏览器。
-Google 登录、验证码、首次加载扩展和填写配对信息由我完成。
-请给我扩展目录的实际绝对路径、服务地址、本地查看令牌的方法，以及 Chrome 的点击步骤。
-不要索取密码、验证码或导出 Cookie，也不要把配对令牌发到公开位置。
-我完成操作后，继续检查服务连接、网页模型和 MCP 工具；必要时提示我新开 Codex 会话。
-交付时说明安装路径、日常启动方法、实际验证结果及未完成步骤，不要把构建成功当作安装完成。
-
-安装后，将 skills/gemini-ui-design 安装到本机的技能目录。前端或 UI 设计可交给 Gemini，
-支持上传现有界面截图与代码，要求它提供改造方案、完整代码或 HTML 示例，再由你实现和验证。
-正常请求使用 3.1 pro、high；困难任务、全局设计/重构，或多次重构仍不满意时使用 4 argon、high。
-4 argon、high 等待 3～5 分钟属正常，持续查询原任务，不因这段等待刷新或重发。
-需要截图、设计说明或代码参考时，用 gemini_files_upload 上传明确选定的文件，
-再通过 gemini_submit 的 attachment_ids 随提问发送，不上传无关文件。
-支持新建会话或绑定已有 Gemini 对话 URL；后续追问复用 session_id，并读取最新 revision。
-同一请求重试复用 request_id 和原附件，提交后保存 job_id 并查询到 completed。
-遇到卡顿或 unknown，按 recovery 建议恢复原任务；上传失败或页面卡顿可用 resume(refresh=true)。
-刷新后先核对原轮，发送前可重建附件，发送后只读取原回复；每任务最多刷新两次。
-只有已授权重试且确认网页缺失的轮次才显式重发一次，不用新会话冒充恢复。
-```
+AI 辅助安装：请按照 https://github.com/chenyanshan/gemini-web-to-api/blob/main/docs/release-install.md 帮我安装 Gemini Local Bridge。
 
 把主 Chrome 中已登录的 Gemini 网页接入本地 HTTP API 和 Codex MCP。
 
@@ -44,7 +12,7 @@ Google 登录、验证码、首次加载扩展和填写配对信息由我完成�
 - **只更新扩展**：下载同一 Release 的 `gemini-web-to-api-X.Y.Z-extension.zip`，先解压再在 Chrome 中加载；仍需运行同版本本地服务。
 - **开发或让 AI 从源码安装**：克隆本仓库，按下文执行。GitHub 自动提供的 `Source code` 压缩包也属于源码，需要构建。
 
-Release 提供 `SHA256SUMS.txt` 校验文件。安装包不包含 Node.js、运行依赖或任何登录信息，首次安装依赖需要联网。顶部提示词默认选择最新稳定 Release；也可以明确要求源码安装。不要对 Release 包执行源码构建步骤。
+Release 提供 `SHA256SUMS.txt` 校验文件。安装包不包含 Node.js、运行依赖或任何登录信息，首次安装依赖需要联网。默认选择最新稳定 Release；已有源码目录或明确要求源码安装时，按下文源码流程执行。不要对 Release 包执行源码构建步骤。
 
 ## 安装前须知
 
@@ -64,7 +32,7 @@ Release 提供 `SHA256SUMS.txt` 校验文件。安装包不包含 Node.js、运�
 
 ## 交给 AI 安装
 
-复制本文顶部的完整提示词即可开始。下面说明 AI 应执行的步骤、需要人配合的操作，以及安装成功的判定标准。
+下面说明 AI 应执行的步骤、需要人配合的操作，以及安装成功的判定标准。安装前检查已有安装，保留原 `.data` 和其他 MCP 配置。
 
 ### AI 与人的分工
 

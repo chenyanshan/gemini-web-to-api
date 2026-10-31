@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import {it,expect,vi,afterEach} from 'vitest';
-import {checkSentAttachments,checkAttachments,waitAttachments,verifyImageSnapshots} from '../extension/attachments';
+import {checkSentAttachments,checkAttachments,waitAttachments,verifyImageSnapshots,assertNoForeignAttachments} from '../extension/attachments';
 import type {Attachment} from '../src/protocol';
 const text:Attachment={id:'text',name:'brief.txt',mimeType:'text/plain',size:2,sha256:'abc',createdAt:0};
 const image:Attachment={...text,id:'image',name:'layout.png',mimeType:'image/png'};
@@ -58,4 +58,42 @@ it('tracks sequential uploads with identical stems without confusing their sourc
  waiting=waitAttachments([js,css],Date.now()+5000,{file:css,before});await vi.advanceTimersByTimeAsync(2500);await waiting;
  expect(checkAttachments([js,css])).toBe(true);
  expect(checkAttachments([js,{...css,id:'changed-source'}])).toBe(false);
+});
+
+it.each(['current-jo...field.dart','current-jo…field.dart'])('recognizes a newly uploaded long Dart filename shown as %s',async name=>{
+ setup();vi.useFakeTimers();
+ const root=document.querySelector('input-container')!;
+ const before=Array.from(root.querySelectorAll('gem-attachment,gem-media-attachment'));
+ const dart={...text,id:'dart',name:'current-job-field.dart.txt'};
+ root.insertAdjacentHTML('beforeend',`<gem-attachment><span class="gem-attachment-text">${name}</span><span class="gem-attachment-extension-label">TXT</span><button aria-label="close ${name}"></button></gem-attachment>`);
+ expect(checkAttachments([text,image,dart])).toBe(false);
+ const waiting=waitAttachments([text,image,dart],Date.now()+5000,{file:dart,before});
+ await vi.advanceTimersByTimeAsync(2500);await waiting;
+ expect(checkAttachments([text,image,dart])).toBe(true);
+ expect(root.querySelectorAll('gem-attachment')[1].getAttribute('data-gemini-bridge-file-id')).toBe(dart.id);
+ expect(checkAttachments([text,image,{...dart,id:'different-snapshot'}])).toBe(false);
+});
+
+it('does not adopt an existing ambiguous shortened filename without upload evidence',()=>{
+ setup();document.querySelector('gem-media-attachment')!.remove();
+ document.querySelector('gem-attachment')!.innerHTML='<span class="gem-attachment-text">current-jo...field.dart</span><span class="gem-attachment-extension-label">TXT</span>';
+ const dart={...text,name:'current-job-field.dart.txt'};
+ expect(checkAttachments([dart])).toBe(false);
+ expect(()=>assertNoForeignAttachments([dart])).toThrow('其他附件');
+});
+
+it.each([
+ ['current-jo...other.dart','TXT',false],
+ ['current-jo...field.dart','PDF',false],
+ ['...','TXT',false],
+ ['current-jo...field.dart','TXT',true],
+])('rejects unmatched names, wrong extensions, and replaced prior cards (%s, %s, replaced=%s)',async(name,ext,replace)=>{
+ setup();vi.useFakeTimers();document.querySelector('gem-media-attachment')!.remove();
+ const root=document.querySelector('input-container')!;const before=Array.from(root.querySelectorAll('gem-attachment'));
+ if(replace){before[0].remove();root.append(before[0].cloneNode(true));}
+ const dart={...text,id:'dart',name:'current-job-field.dart.txt'};
+ root.insertAdjacentHTML('beforeend',`<gem-attachment><span class="gem-attachment-text">${name}</span><span class="gem-attachment-extension-label">${ext}</span></gem-attachment>`);
+ const waiting=expect(waitAttachments([text,dart],Date.now()+1000,{file:dart,before})).rejects.toMatchObject({code:'attachment_not_ready'});
+ await vi.advanceTimersByTimeAsync(1500);await waiting;
+ expect(root.querySelector('[data-gemini-bridge-file-id]')).toBeNull();
 });

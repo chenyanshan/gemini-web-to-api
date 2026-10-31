@@ -101,6 +101,26 @@ it('rebuilds missing unsent attachments after a persisted refresh, then sends ex
  expect('result' in result).toBe(true);expect(attach).toHaveBeenCalledTimes(1);expect(click).toHaveBeenCalledTimes(1);
  expect((storage['job:job'] as {checkpoint:Checkpoint}).checkpoint.recovery).toEqual({refreshes:1,resetUpload:false});
 });
+it('submits long Dart attachment names once and verifies the full filename in the sent turn',async()=>{
+ const {execute}=await import('../extension/content');const uploads=await import('../extension/attachments');
+ const c=command();const file={id:'dart',name:'current-job-field.dart.txt',mimeType:'text/plain',size:2,sha256:'hash',createdAt:0};
+ c.job.attachments=[file];
+ const wrapper=document.createElement('input-container');document.body.append(wrapper);wrapper.append(document.querySelector('[role=textbox]')!);
+ const input=document.createElement('input');input.type='file';input.accept='text/plain';wrapper.append(input);
+ vi.spyOn(uploads,'attachmentFile').mockResolvedValue(new File(['UI'],file.name,{type:file.mimeType}));
+ const attach=vi.spyOn(uploads,'attach').mockImplementation(()=>{
+  wrapper.insertAdjacentHTML('beforeend','<gem-attachment><span class="gem-attachment-text">current-jo...field.dart</span><span class="gem-attachment-extension-label">TXT</span></gem-attachment>');
+ });
+ const click=vi.fn(()=>{
+  expect(uploads.checkAttachments([file])).toBe(true);
+  expect((storage['job:job'] as {checkpoint:Checkpoint}).checkpoint.phase).toBe('dispatching');
+  document.body.insertAdjacentHTML('beforeend','<user-query><user-query-file-preview><div data-test-id="uploaded-file"><button aria-label="current-job-field.dart.txt"></button></div></user-query-file-preview><div class="query-text">Improve button spacing.</div></user-query><model-response><div class="markdown">Use 8px.</div><button aria-label="Copy"></button></model-response>');
+ });
+ document.querySelector('[aria-label=Send]')!.addEventListener('click',click);
+ const pending=execute(c,'3.1 Pro');await vi.advanceTimersByTimeAsync(8000);const result=await pending;
+ expect('result' in result).toBe(true);expect(attach).toHaveBeenCalledTimes(1);expect(click).toHaveBeenCalledTimes(1);
+ expect(await execute({...c,recover:true},'3.1 Pro')).toEqual(result);expect(click).toHaveBeenCalledTimes(1);
+});
 it('waits for old history to load after refresh instead of treating it as a conflicting conversation',async()=>{
  const {execute}=await import('../extension/content');const c=command(true);
  c.job.checkpoint={phase:'submitted',beforeUsers:['Old question'],beforeReplies:['Old answer'],prompt:c.job.prompt,conversationUrl:c.session.conversationUrl,modelLabel:'Pro',thinkingLabel:'中',updatedAt:Date.now()};
@@ -108,6 +128,33 @@ it('waits for old history to load after refresh instead of treating it as a conf
  const pending=execute(c,'3.1 Pro');await vi.advanceTimersByTimeAsync(2000);
  document.body.insertAdjacentHTML('beforeend','<user-query><div class="query-text">Old question</div></user-query><model-response><div class="markdown">Old answer</div></model-response><user-query><div class="query-text">Improve button spacing.</div></user-query><model-response><div class="markdown">Use 8px.</div><button aria-label="Copy"></button></model-response>');
  await vi.advanceTimersByTimeAsync(5000);const result=await pending;expect('result' in result).toBe(true);expect(click).not.toHaveBeenCalled();
+});
+
+it.each([true,false])('reconciles a manually submitted prepared draft only when all attachments match (match=%s)',async matching=>{
+ const {execute}=await import('../extension/content');const page=await import('../extension/adapter');
+ vi.mocked(page.selectModel).mockClear();vi.mocked(page.selectThinking).mockClear();
+ const c=command(true);const file={id:'dart',name:'current-job-field.dart.txt',mimeType:'text/plain',size:2,sha256:'hash',createdAt:0};
+ c.job.attachments=[file];c.job.checkpoint={phase:'preparing',beforeUsers:[],beforeReplies:[],prompt:c.job.prompt,conversationUrl:c.session.conversationUrl,modelLabel:'Pro',thinkingLabel:'中',upload:{ids:[file.id],state:'uploading'},updatedAt:Date.now()};
+ document.querySelector('[role=textbox]')!.textContent='';
+ document.body.insertAdjacentHTML('beforeend',`<user-query><user-query-file-preview><div data-test-id="uploaded-file"><button aria-label="${matching?file.name:'different.dart.txt'}"></button></div></user-query-file-preview><div class="query-text">Improve button spacing.</div></user-query><model-response><div class="markdown">Use 8px.</div><button aria-label="Copy"></button></model-response>`);
+ const click=vi.fn();document.querySelector('[aria-label=Send]')!.addEventListener('click',click);
+ const pending=execute(c,'3.1 Pro');await vi.advanceTimersByTimeAsync(5000);const result=await pending;
+ if(matching){
+  expect('result' in result).toBe(true);
+  expect((storage['job:job'] as {checkpoint:Checkpoint}).checkpoint).toMatchObject({phase:'submitted',upload:{ids:[file.id],state:'ready'}});
+ }else expect('error' in result && result.error.code).toBe('attachment_conflict');
+ expect(click).not.toHaveBeenCalled();expect(page.selectModel).not.toHaveBeenCalled();expect(page.selectThinking).not.toHaveBeenCalled();
+ expect(sendProgress.mock.calls.some(([m])=>m.type==='attachmentData')).toBe(false);
+});
+it('prevents automatic refresh when a user submits during the attachment wait',async()=>{
+ const {execute}=await import('../extension/content');const c=command(true);
+ c.job.attachments=[{id:'dart',name:'current-job-field.dart.txt',mimeType:'text/plain',size:2,sha256:'hash',createdAt:0}];
+ c.job.checkpoint={phase:'preparing',beforeUsers:[],beforeReplies:[],prompt:c.job.prompt,conversationUrl:c.session.conversationUrl,modelLabel:'Pro',upload:{ids:['dart'],state:'uploading'},updatedAt:Date.now()};
+ const click=vi.fn();document.querySelector('[aria-label=Send]')!.addEventListener('click',click);
+ const pending=execute(c,'3.1 Pro');await vi.advanceTimersByTimeAsync(1000);
+ document.body.insertAdjacentHTML('beforeend','<user-query><div class="query-text">Improve button spacing.</div></user-query>');
+ await vi.advanceTimersByTimeAsync(32000);const result=await pending;
+ expect('error' in result && result.error.code).toBe('session_conflict');expect(click).not.toHaveBeenCalled();
 });
 it('returns a recoverable stall before the total deadline without clicking send again',async()=>{
  const {execute}=await import('../extension/content');const c=command(true);c.job.deadline=Date.now()+180000;

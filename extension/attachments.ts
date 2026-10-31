@@ -5,14 +5,20 @@ export const composer=()=>editor()?.closest('input-container') || editor()?.clos
 export function cards(root:ParentNode|null=composer()):Element[] {
   return root?Array.from(root.querySelectorAll('gem-attachment, gem-media-attachment')):[];
 }
-function matches(card:Element,file:Attachment) {
+function displayedNameMatches(text:string,name:string,allowTruncated:boolean) {
+  if(text===name)return true;
+  if(!allowTruncated)return false;
+  const parts=text.split(/\.\.\.|…/);
+  return parts.length===2 && parts.every(Boolean) && name.length>parts[0].length+parts[1].length && name.startsWith(parts[0]) && name.endsWith(parts[1]);
+}
+function matches(card:Element,file:Attachment,allowTruncated=false) {
   const tracked=card.getAttribute('data-gemini-bridge-file-id');
   if(tracked)return tracked===file.id;
   if(card.tagName.toLowerCase()==='gem-media-attachment')return file.mimeType.startsWith('image/') && !!card.querySelector('img');
   const text=normalized(card.querySelector('.gem-attachment-text')?.textContent || '');
   const ext=normalized(card.querySelector('.gem-attachment-extension-label')?.textContent || '').toLowerCase();
   const dot=file.name.lastIndexOf('.');
-  return text===file.name || (dot>0 && text===file.name.slice(0,dot) && (ext===file.name.slice(dot+1).toLowerCase() || (!ext && !!card.querySelector('img[src*="/type/text/code"]')))) ||
+  return displayedNameMatches(text,file.name,allowTruncated) || (dot>0 && displayedNameMatches(text,file.name.slice(0,dot),allowTruncated) && (ext===file.name.slice(dot+1).toLowerCase() || (!ext && !!card.querySelector('img[src*="/type/text/code"]')))) ||
     Array.from(card.querySelectorAll('img')).some(img=>img.getAttribute('alt')===file.name);
 }
 export function checkAttachments(files:Attachment[],root:ParentNode|null=composer(),requireReady=true) {
@@ -35,8 +41,12 @@ export async function waitAttachments(files:Attachment[],deadline:number,pending
     if(cards().some(c=>c.querySelector('.upload-error, .error') || /上传失败|无法上传|不支持|upload failed|unsupported|could not upload/i.test(c.textContent || '')))throw new PageError('attachment_upload_failed','附件上传失败，尝试刷新原页后重新准备');
     if(cards().length>files.length)throw new PageError('attachment_conflict','输入区出现额外附件，停止发送');
     if(pending){
-      const added=cards().filter(c=>!pending.before.includes(c));
-      if(added.length===1 && matches(added[0],pending.file))added[0].setAttribute('data-gemini-bridge-file-id',pending.file.id);
+      const actual=cards();
+      const added=actual.filter(c=>!pending.before.includes(c));
+      // Gemini shortens long filenames in the DOM, including the close label.
+      // Only bind a shortened name to the single new card from our own upload;
+      // never use a fuzzy name to adopt an existing or restored draft attachment.
+      if(added.length===1 && pending.before.every(c=>actual.includes(c)) && matches(added[0],pending.file,true))added[0].setAttribute('data-gemini-bridge-file-id',pending.file.id);
     }
     const button=sendButton();
     if(checkAttachments(files) && button && !button.disabled && button.getAttribute('aria-disabled')!=='true'){

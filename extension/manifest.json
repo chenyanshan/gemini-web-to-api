@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gemini Local Bridge",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "将当前 Chrome 中的 Gemini 对话接入本地 API 和 Codex MCP。",
   "minimum_chrome_version": "116",
   "permissions": [

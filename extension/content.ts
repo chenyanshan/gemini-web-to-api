@@ -30,6 +30,20 @@ export async function execute(command:RunCommand,target:string):Promise<Outcome>
       while((page.userMessages().length<cp.beforeUsers.length || page.replies().length<cp.beforeReplies.length) && Date.now()<deadline)await page.pause(300);
     }
     if(command.recover && !cp)throw new page.PageError('send_state_unknown','恢复任务缺少发送前记录，不能安全重发');
+    // A user may submit our prepared draft while an attachment check is blocked.
+    // Adopt only the exact next turn with every expected attachment; do not touch
+    // the composer, switch models, or click Send while reconciling that turn.
+    if(command.recover && cp?.phase==='preparing'){
+      const users=page.userMessages(),replies=page.replies();
+      if(users.length===cp.beforeUsers.length+1 && replies.length<=cp.beforeReplies.length+1 && page.prefixMatches(cp.beforeUsers,users) && page.prefixMatches(cp.beforeReplies,replies) && page.normalized(users.at(-1)!)===page.normalized(command.job.prompt)){
+        const files=command.job.attachments || [];
+        if(files.length && !uploads.checkSentAttachments(files,Array.from(document.querySelectorAll('user-query')).at(-1) || null))throw new page.PageError('attachment_conflict','手动提交的原轮附件无法完整核对；保留页面，不会重发');
+        if(!page.matchesCurrentModel(page.currentModel(),target))throw new page.PageError('model_mismatch','手动提交后的网页模型与原任务不一致；保留页面');
+        cp={...cp,phase:'submitted',conversationUrl:page.currentUrl(),upload:files.length?{ids:files.map(f=>f.id),state:'ready'}:undefined,recovery:cp.recovery?{...cp.recovery,resetUpload:false}:undefined};
+        sendIntent=true;
+        await progress(command,cp,'submitted');
+      }
+    }
     if(!sendIntent) {
       if(page.generating())throw new page.PageError('session_conflict','页面已有其他生成任务');
       const beforeUsers=page.userMessages(),beforeReplies=page.replies();
@@ -141,7 +155,10 @@ export async function execute(command:RunCommand,target:string):Promise<Outcome>
     }
     throw new page.PageError('generation_timeout','等待超过总期限；请查看检查点和恢复建议，查询原任务，不要另建重复请求');
   } catch(e) {
-    const error=e instanceof page.PageError?e:new page.PageError('adapter_error',(e as Error).message);
+    let error=e instanceof page.PageError?e:new page.PageError('adapter_error',(e as Error).message);
+    if(!sendIntent && cp?.phase==='preparing' && !['attachment_conflict','model_mismatch','session_conflict'].includes(error.code) && page.userMessages().length>cp.beforeUsers.length){
+      error=new page.PageError('session_conflict','准备期间页面出现新提问，可能已手动提交；保留页面，检查原任务后用不刷新的恢复核对，禁止重新发送');
+    }
     const uncertain=sendIntent || command.recover || !!cp?.upload?.ids.length || ['attachment_conflict','session_conflict','draft_conflict'].includes(error.code);
     const outcome:Outcome={error:{code:error.code,message:error.message},state:error.code==='login_required'?'blocked_login':uncertain?'unknown':'failed',checkpoint:cp};
     if(cp)await saveLedger(command.job.id,{checkpoint:cp,outcome});

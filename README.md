@@ -1,6 +1,10 @@
 # Gemini Local Bridge
 
-AI 辅助安装：请按照 https://github.com/chenyanshan/gemini-web-to-api/blob/main/docs/release-install.md 帮我安装 Gemini Local Bridge。
+## AI 辅助安装
+
+```markdown
+请按照 https://github.com/chenyanshan/gemini-web-to-api/blob/main/docs/release-install.md 帮我安装 Gemini Local Bridge。
+```
 
 把主 Chrome 中已登录的 Gemini 网页接入本地 HTTP API 和 Codex MCP。
 

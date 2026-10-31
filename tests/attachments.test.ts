@@ -36,3 +36,26 @@ it('reconciles sent image and document previews, rejecting missing or renamed fi
  expect(checkSentAttachments([image,{...text,name:'other.txt'}],root)).toBe(false);
  root.querySelector('img')!.remove();expect(checkSentAttachments([image,text],root)).toBe(false);
 });
+
+it('recognizes code cards that omit an extension label, rejecting ambiguous basenames',()=>{
+ setup();document.querySelector('gem-media-attachment')!.remove();
+ document.querySelector('gem-attachment')!.innerHTML='<span class="gem-attachment-text">component</span><img src="https://drive-thirdparty.googleusercontent.com/32/type/text/code">';
+ const code={...text,name:'component.html',mimeType:'text/html'};
+ expect(checkAttachments([code])).toBe(true);
+ expect(checkAttachments([{...code,name:'other.html'}])).toBe(false);
+ document.querySelector('input-container')!.append(document.querySelector('gem-attachment')!.cloneNode(true));
+ expect(checkAttachments([code,{...code,id:'css',name:'component.css',mimeType:'text/css'}])).toBe(false);
+});
+
+it('tracks sequential uploads with identical stems without confusing their source snapshots',async()=>{
+ setup();vi.useFakeTimers();document.querySelector('gem-media-attachment')!.remove();document.querySelector('gem-attachment')!.remove();
+ const js={...text,id:'js',name:'component.js',mimeType:'text/javascript'},css={...text,id:'css',name:'component.css',mimeType:'text/css'};
+ const root=document.querySelector('input-container')!;
+ const html='<gem-attachment><span class="gem-attachment-text">component</span><img src="https://drive-thirdparty.googleusercontent.com/32/type/text/code"></gem-attachment>';
+ root.insertAdjacentHTML('beforeend',html);
+ let waiting=waitAttachments([js],Date.now()+5000,{file:js,before:[]});await vi.advanceTimersByTimeAsync(2500);await waiting;
+ const before=Array.from(root.querySelectorAll('gem-attachment'));root.insertAdjacentHTML('beforeend',html);
+ waiting=waitAttachments([js,css],Date.now()+5000,{file:css,before});await vi.advanceTimersByTimeAsync(2500);await waiting;
+ expect(checkAttachments([js,css])).toBe(true);
+ expect(checkAttachments([js,{...css,id:'changed-source'}])).toBe(false);
+});

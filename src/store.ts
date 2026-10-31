@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
-import { MAX_FILE_BYTES, MAX_TOTAL_BYTES, MAX_ATTACHMENTS, type Attachment, type Job, type Session, type Model, type ThinkingLevel, type Outcome, type Checkpoint, isActive, conversationUrl } from './protocol.js';
+import { MAX_FILE_BYTES, MAX_TOTAL_BYTES, MAX_ATTACHMENTS, type Attachment, type Job, type Session, type Model, type ThinkingLevel, type Outcome, type Checkpoint, isActive, conversationUrl, defaultJobTimeout } from './protocol.js';
 export class ApiError extends Error {
   constructor(public code: string, message: string, public status = 400) { super(message); }
 }
@@ -53,27 +53,38 @@ export class Store {
     const job = {...this.job(id), ...changes, updatedAt: Date.now()};
     this.db.prepare('UPDATE jobs SET data=? WHERE id=?').run(JSON.stringify(job), id); return job;
   }
-  createSession(model: Model, label = '', url?: string, thinkingLevel: ThinkingLevel = 'medium') {
+  createSession(model: Model, label = '', url?: string, thinkingLevel: ThinkingLevel = 'high') {
     let normalized: string | null = null;
     if (url) { try { normalized = conversationUrl(url); } catch (e) { throw new ApiError('invalid_conversation_url', (e as Error).message); } }
     if (normalized && this.sessions().some(s => s.conversationUrl === normalized)) throw new ApiError('session_exists', '这条网页对话已绑定，请复用已有 session_id', 409);
     return this.saveSession({ id: randomUUID(), label, model, thinkingLevel, conversationUrl: normalized, revision: 0, browserId: null, status: 'ready', createdAt: Date.now() });
   }
-  submit(sessionId: string, requestId: string, prompt: string, expectedRevision: number, timeoutMs = 600_000, attachmentIds:string[] = []) {
+  updateSession(id:string, expectedRevision:number, model?:Model, thinkingLevel?:ThinkingLevel) {
+    const session=this.session(id);
+    if(session.status!=='ready' || this.jobs().some(j=>j.sessionId===id && (j.state==='queued' || isActive(j.state))))throw new ApiError('session_busy','先处理当前任务，再切换模型或思考等级',409);
+    // Identical updates can be replayed after a lost response without advancing revision again.
+    if(session.model===(model || session.model) && session.thinkingLevel===(thinkingLevel || session.thinkingLevel))return session;
+    if(session.revision!==expectedRevision)throw new ApiError('revision_conflict',`当前会话 revision 为 ${session.revision}`,409);
+    for(const job of this.jobs().filter(j=>j.sessionId===id && !j.model))this.patchJob(job.id,{model:session.model,thinkingLevel:session.thinkingLevel});
+    return this.saveSession({...session,model:model || session.model,thinkingLevel:thinkingLevel || session.thinkingLevel,revision:session.revision+1});
+  }
+  submit(sessionId: string, requestId: string, prompt: string, expectedRevision: number, timeoutMs?: number, attachmentIds:string[] = []) {
     const session = this.session(sessionId);
     if(attachmentIds.length>MAX_ATTACHMENTS)throw new ApiError('too_many_files','每轮最多 10 个附件');
     const attachments=attachmentIds.map(id=>this.file(id));
     if(new Set(attachments.map(f=>f.name)).size!==attachments.length)throw new ApiError('duplicate_filename','同一轮附件文件名不能重复');
     if(attachments.reduce((n,f)=>n+f.size,0)>MAX_TOTAL_BYTES)throw new ApiError('files_too_large','每轮附件总计不能超过 40 MiB',413);
-    const inputHash = createHash('sha256').update(JSON.stringify({prompt,expectedRevision,model:session.model,thinkingLevel:session.thinkingLevel,timeoutMs,...(attachments.length?{attachmentIds}: {})})).digest('hex');
     const old = this.db.prepare('SELECT data FROM jobs WHERE session_id=? AND request_id=?').get(sessionId, requestId) as {data:string}|undefined;
-    if (old) { const job: Job = JSON.parse(old.data); if (job.inputHash !== inputHash) throw new ApiError('idempotency_conflict', '同一个 request_id 已用于不同内容', 409); return job; }
+    const previous:Job|undefined=old?JSON.parse(old.data):undefined;
+    timeoutMs ??= previous ? (previous.timeoutMs ?? 600_000) : defaultJobTimeout(session.model,session.thinkingLevel);
+    const inputHash = createHash('sha256').update(JSON.stringify({prompt,expectedRevision,model:previous?.model || session.model,thinkingLevel:previous?.thinkingLevel || session.thinkingLevel,timeoutMs,...(attachments.length?{attachmentIds}: {})})).digest('hex');
+    if (previous) { if (previous.inputHash !== inputHash) throw new ApiError('idempotency_conflict', '同一个 request_id 已用于不同内容', 409); return previous; }
     if (session.status === 'blocked') throw new ApiError('session_blocked', '先恢复原任务；不要为同一问题创建新请求', 409);
     if (session.revision !== expectedRevision) throw new ApiError('revision_conflict', `当前会话 revision 为 ${session.revision}`, 409);
     if (this.jobs().some(j => j.sessionId === sessionId && (j.state === 'queued' || isActive(j.state)))) throw new ApiError('session_busy', '同一会话已有任务；完成后获取新 revision 再提交', 409);
     const now = Date.now();
-    const job: Job = { id: randomUUID(), sessionId, requestId, prompt, inputHash, expectedRevision, attachments,
-      state:'queued', createdAt:now, updatedAt:now, deadline:now + timeoutMs, attempt:0, checkpoint:null, result:null, error:null };
+    const job: Job = { id: randomUUID(), sessionId, requestId, prompt, inputHash, expectedRevision, attachments, model:session.model, thinkingLevel:session.thinkingLevel,
+      timeoutMs, state:'queued', createdAt:now, updatedAt:now, deadline:now + timeoutMs, attempt:0, checkpoint:null, result:null, error:null };
     this.db.prepare('INSERT INTO jobs VALUES (?,?,?,?)').run(job.id, sessionId, requestId, JSON.stringify(job));
     this.saveSession({...session, status:'busy'}); return job;
   }
@@ -90,7 +101,12 @@ export class Store {
     const attachmentIds=(job.attachments || []).map(f=>f.id);
     const upload=checkpoint.upload;
     if(upload && (upload.ids.length>attachmentIds.length || upload.ids.some((id,i)=>id!==attachmentIds[i]) || (upload.state==='ready' && upload.ids.length!==attachmentIds.length)))throw new ApiError('checkpoint_conflict','附件上传记录与任务不一致',409);
-    if(job.checkpoint?.upload && (!upload || upload.ids.length<job.checkpoint.upload.ids.length))throw new ApiError('checkpoint_conflict','附件上传记录不能回退',409);
+    const prior=job.checkpoint;
+    const refreshes=checkpoint.recovery?.refreshes || 0, priorRefreshes=prior?.recovery?.refreshes || 0;
+    if(refreshes<priorRefreshes || refreshes>priorRefreshes+1 || refreshes>2)throw new ApiError('checkpoint_conflict','刷新次数无效',409);
+    if(checkpoint.recovery?.resetUpload && checkpoint.phase!=='preparing')throw new ApiError('checkpoint_conflict','已发送任务不能清除附件记录',409);
+    const reset=prior?.phase==='preparing' && prior.recovery?.resetUpload && !checkpoint.recovery?.resetUpload && refreshes===priorRefreshes;
+    if(job.checkpoint?.upload && (!upload || upload.ids.length<job.checkpoint.upload.ids.length) && !reset)throw new ApiError('checkpoint_conflict','附件上传记录不能回退',409);
     if(attachmentIds.length && checkpoint.phase!=='preparing' && upload?.state!=='ready')throw new ApiError('checkpoint_conflict','附件尚未就绪，禁止发送',409);
     // Never forget a durable send intent, even if an earlier progress event arrives late.
     const rank = {preparing:0, dispatching:1, submitted:2};
@@ -103,7 +119,7 @@ export class Store {
       if (this.sessions().some(other => other.id !== s.id && other.conversationUrl === url)) throw new ApiError('session_conflict','对话已绑定其他会话',409);
       this.saveSession({...s, conversationUrl:url});
     }
-    return this.patchJob(id, {checkpoint,state});
+    return this.patchJob(id, {checkpoint,state,...(refreshes>priorRefreshes?{refreshRequested:false}:{})});
   }
   finish(id: string, outcome: Outcome) {
     let job = this.job(id);
@@ -157,16 +173,17 @@ export class Store {
       this.patchJob(id,{state:'failed',error:{code:'retry_authorized',message:'用户已明确授权重发缺失的一轮；原发送记录已保留'}});
       const session=this.session(old.sessionId);
       this.saveSession({...session,status:'ready'});
-      const job=this.submit(old.sessionId,requestId,old.prompt,session.revision,600_000,(old.attachments || []).map(f=>f.id));
+      const job=this.submit(old.sessionId,requestId,old.prompt,session.revision,old.timeoutMs ?? defaultJobTimeout(old.model || session.model,old.thinkingLevel || session.thinkingLevel),(old.attachments || []).map(f=>f.id));
       this.patchJob(id,{replacementJobId:job.id});
       this.db.exec('COMMIT');return job;
     } catch(e){this.db.exec('ROLLBACK');throw e;}
   }
-  resume(id: string) {
+  resume(id: string, refresh = false) {
     const job = this.job(id);
     if (!['unknown','blocked_login'].includes(job.state)) throw new ApiError('not_resumable','仅可恢复 unknown 或 blocked_login 任务',409);
     if (this.jobs().some(j => j.id !== id && j.sessionId === job.sessionId && (j.state === 'queued' || isActive(j.state)))) throw new ApiError('session_busy','会话已有其他任务',409);
+    if(refresh && (job.checkpoint?.recovery?.refreshes || 0)>=2)throw new ApiError('recovery_exhausted','本任务已刷新两次；请检查错误原因，不再重复刷新',409);
     this.saveSession({...this.session(job.sessionId),status:'busy'});
-    return this.patchJob(id, {state:'reconciling',deadline:Date.now()+600_000,error:null});
+    return this.patchJob(id, {state:'reconciling',deadline:Date.now()+defaultJobTimeout(job.model || this.session(job.sessionId).model,job.thinkingLevel || this.session(job.sessionId).thinkingLevel),error:null,refreshRequested:refresh});
   }
 }

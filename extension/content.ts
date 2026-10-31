@@ -1,4 +1,4 @@
-import { type RunCommand, type Checkpoint, type Outcome } from '../src/protocol';
+import { generationIdleTimeout, type RunCommand, type Checkpoint, type Outcome } from '../src/protocol';
 import * as page from './adapter';
 import * as uploads from './attachments';
 type Ledger={checkpoint:Checkpoint;outcome?:Outcome};
@@ -25,24 +25,36 @@ export async function execute(command:RunCommand,target:string):Promise<Outcome>
     for(let n=0;n<100 && (!page.editor() || !page.currentModel()) && !page.loginRequired();n++)await page.pause(250);
     if(page.loginRequired())throw new page.PageError('login_required','请在此 Chrome 配置文件中登录 Gemini 后恢复原任务');
     verifyConversation(command,cp);
+    if(cp){
+      const deadline=Math.min(command.job.deadline,Date.now()+15000);
+      while((page.userMessages().length<cp.beforeUsers.length || page.replies().length<cp.beforeReplies.length) && Date.now()<deadline)await page.pause(300);
+    }
     if(command.recover && !cp)throw new page.PageError('send_state_unknown','恢复任务缺少发送前记录，不能安全重发');
     if(!sendIntent) {
       if(page.generating())throw new page.PageError('session_conflict','页面已有其他生成任务');
-      const modelLabel=await page.selectModel(target);
-      const thinkingLabel=await page.selectThinking(command.session.thinkingLevel);
       const beforeUsers=page.userMessages(),beforeReplies=page.replies();
       if(cp && (!page.prefixMatches(cp.beforeUsers,beforeUsers) || beforeUsers.length!==cp.beforeUsers.length || !page.prefixMatches(cp.beforeReplies,beforeReplies) || beforeReplies.length!==cp.beforeReplies.length))throw new page.PageError('session_conflict','准备阶段原会话内容发生变化');
       // Compare a persisted baseline for follow-up turns, including human changes between jobs.
       const baselineKey=`baseline:${command.session.id}`;
       const baseline=(await chrome.storage.local.get<Record<string,{users:string[];replies:string[]}|undefined>>(baselineKey))[baselineKey];
       if(baseline && (JSON.stringify(baseline.users)!==JSON.stringify(beforeUsers) || JSON.stringify(baseline.replies)!==JSON.stringify(beforeReplies)))throw new page.PageError('session_conflict','对话历史与上次完成时不一致，可能有手工消息或历史尚未加载');
-      cp={upload:cp?.upload,phase:'preparing',beforeUsers,beforeReplies,prompt:command.job.prompt,conversationUrl:page.currentUrl(),modelLabel,thinkingLabel,updatedAt:Date.now()};
+      cp={recovery:cp?.recovery,upload:cp?.upload,phase:'preparing',beforeUsers,beforeReplies,prompt:command.job.prompt,conversationUrl:page.currentUrl(),modelLabel:cp?.modelLabel || '',thinkingLabel:cp?.thinkingLabel,updatedAt:Date.now()};
+      await progress(command,cp,'preparing');
+      cp.modelLabel=await page.selectModel(target);
+      cp.thinkingLabel=await page.selectThinking(command.session.thinkingLevel);
       await progress(command,cp,'preparing');
       const editor=page.editor();
       const draft=editor instanceof HTMLTextAreaElement?editor.value:editor?.innerText || '';
       // A resumed preparation can retain our unsent draft. Never overwrite unrelated drafts.
       if(page.normalized(draft)!==page.normalized(command.job.prompt))await page.fillPrompt(command.job.prompt);
       const files=command.job.attachments || [];
+      if(cp.recovery?.resetUpload){
+        // Navigation may restore a draft. Reuse it if present; never append a second
+        // copy. An empty composer and unchanged history prove this is safe to rebuild.
+        if(!uploads.cards().length)cp.upload=undefined;
+        cp.recovery={...cp.recovery,resetUpload:false};
+        await progress(command,cp,'preparing');
+      }
       const started=cp.upload?.ids || [];
       if(started.some((id,i)=>files[i]?.id!==id))throw new page.PageError('attachment_conflict','附件上传记录与原请求不一致');
       uploads.assertNoForeignAttachments(files.slice(0,started.length));
@@ -52,8 +64,9 @@ export async function execute(command:RunCommand,target:string):Promise<Outcome>
         const input=await uploads.fileInput(files[i]);
         cp.upload={ids:files.slice(0,i+1).map(f=>f.id),state:'uploading'};
         await progress(command,cp,'preparing');
+        const before=uploads.cards();
         uploads.attach(input,file);
-        await uploads.waitAttachments(files.slice(0,i+1),Math.min(command.job.deadline,Date.now()+120000));
+        await uploads.waitAttachments(files.slice(0,i+1),Math.min(command.job.deadline,Date.now()+120000),{file:files[i],before});
       }
       if(files.length){
         await uploads.verifyImageSnapshots(files);
@@ -80,6 +93,7 @@ export async function execute(command:RunCommand,target:string):Promise<Outcome>
     let streamingReported=false;
     let missingSince=Date.now();
     let attachmentsMissingSince=0;
+    let activityAt=Date.now(),lastActivity='';
     while(Date.now()<command.job.deadline) {
       await page.pause(600);
       if(page.loginRequired())throw new page.PageError('login_required','登录已失效，请登录后恢复原任务');
@@ -102,6 +116,10 @@ export async function execute(command:RunCommand,target:string):Promise<Outcome>
       } else if(seenUser || (command.recover && Date.now()-missingSince>15_000)) {
         throw new page.PageError('turn_missing','原对话里未找到本轮提问，可能未持久化。已保留原提问；不会自动重发或切换模型');
       }
+      const activity=JSON.stringify([users,replies]);
+      if(activity!==lastActivity){lastActivity=activity;activityAt=Date.now();}
+      const idleTimeout=generationIdleTimeout(command.session.model,command.session.thinkingLevel);
+      if(Date.now()-activityAt>idleTimeout)throw new page.PageError('generation_stalled',`页面超过 ${idleTimeout/1000} 秒没有回复进展，尝试刷新原对话核对`);
       const failure=page.pageFailure();if(failure)throw new page.PageError('generation_failed',failure);
       if(!seenUser)continue;
       const modelLabel=page.currentModel();
@@ -121,7 +139,7 @@ export async function execute(command:RunCommand,target:string):Promise<Outcome>
         return outcome;
       }
     }
-    throw new page.PageError('generation_timeout','等待超过总期限。没有刷新网页或重发消息；可恢复原任务继续查询');
+    throw new page.PageError('generation_timeout','等待超过总期限；请查看检查点和恢复建议，查询原任务，不要另建重复请求');
   } catch(e) {
     const error=e instanceof page.PageError?e:new page.PageError('adapter_error',(e as Error).message);
     const uncertain=sendIntent || command.recover || !!cp?.upload?.ids.length || ['attachment_conflict','session_conflict','draft_conflict'].includes(error.code);
@@ -135,7 +153,7 @@ const messageHandler:Parameters<typeof chrome.runtime.onMessage.addListener>[0]=
     respond({visibility:document.visibilityState,focused:document.hasFocus(),url:page.currentUrl(),model:page.currentModel(),generating:page.generating(),users:page.userMessages(),replies:page.replies(),editor:page.editor()?.outerHTML.slice(0,3000),composerHtml:uploads.composer()?.outerHTML.slice(0,60000),userHtml:Array.from(document.querySelectorAll('user-query')).at(-1)?.outerHTML.slice(0,40000),buttons:Array.from(document.querySelectorAll<HTMLElement>('model-response button, user-query button, button[data-test-id="bard-mode-menu-button"], button[aria-label="发送消息"], button[aria-label="停止回答"]')).filter(e=>e.getClientRects().length>0).map(e=>({label:e.getAttribute('aria-label'),testId:e.getAttribute('data-test-id'),text:e.innerText})),replyHtml:page.replyElements().at(-1)?.outerHTML.slice(0,60000)});return;
   }
   if(message.type==='ping'){respond({ok:true,url:page.currentUrl()});return;}
-  if(message.type==='inspectControls'){page.inspectControls().then(respond).catch(e=>respond({ok:false,error:e.message}));return true;}
+  if(message.type==='inspectControls'){page.inspectControls(message.selections).then(respond).catch(e=>respond({ok:false,error:e.message,diagnostic:{url:location.href,title:document.title,readyState:document.readyState,pickers:Array.from(document.querySelectorAll('[data-test-id="bard-mode-menu-button"]')).map(e=>({html:e.outerHTML.slice(0,2000),hiddenAncestor:e.closest('[data-visible="false"], [hidden]')?.outerHTML.slice(0,500),rects:e.getClientRects().length}))}}));return true;}
   if(message.type==='models') {page.listModels().then(options=>respond({ok:true,options,current:page.currentModel(),url:page.currentUrl()})).catch(e=>respond({ok:false,error:e.message}));return true;}
   if(message.type==='run') {
     const command:RunCommand=message.command;

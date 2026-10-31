@@ -1,4 +1,6 @@
 import { type RunCommand, type Outcome } from '../src/protocol';
+import {runWithRecovery,bounded} from './recovery';
+import type {Checkpoint} from '../src/protocol';
 type Settings={url:string;token:string;browserId:string;labels:Record<string,string>};
 let socket:WebSocket|null=null;
 let ready=false,connecting=false;
@@ -58,10 +60,14 @@ async function connect(){
             if(running.size)throw new Error('任务正在执行');
             const tab=await chrome.tabs.create({url:'https://gemini.google.com/app',active:false});if(!tab.id)throw new Error('无法创建诊断标签页');
             try {
-              let loaded=false;
-              for(let i=0;i<40;i++){try{const ping=await chrome.tabs.sendMessage(tab.id,{type:'ping'});if(ping?.ok){loaded=true;break;}}catch{}await new Promise(r=>setTimeout(r,200));}
-              if(!loaded)throw new Error('诊断页面未就绪');
-              const result=await chrome.tabs.sendMessage(tab.id,{type:'inspectControls'});
+              await activateWorkerTab(tab.id);
+              let loaded=false,lastError='';
+              for(let i=0;i<60;i++){
+                try{const ping=await chrome.tabs.sendMessage(tab.id,{type:'ping'});if(ping?.ok){loaded=true;break;}}catch(e){lastError=(e as Error).message;if(i%8===0)await chrome.scripting.executeScript({target:{tabId:tab.id},files:['content.js']}).catch(e=>{lastError=e.message;});}
+                await new Promise(r=>setTimeout(r,250));
+              }
+              if(!loaded){const state=await chrome.tabs.get(tab.id);throw new Error(`诊断页面未就绪 (${state.status}, ${state.url}): ${lastError}`);}
+              const result=await chrome.tabs.sendMessage(tab.id,{type:'inspectControls',selections:message.selections});
               send({type:'inspection',controlId:message.controlId,result});
             } finally{await chrome.tabs.remove(tab.id).catch(()=>{});}
           } catch(e){send({type:'inspection',controlId:message.controlId,result:{ok:false,error:(e as Error).message}});}
@@ -107,7 +113,7 @@ async function getTab(command:RunCommand):Promise<number> {
       if((e as Error).message.startsWith('原任务'))throw e;
     }
   }
-  if(command.recover && !command.session.conversationUrl)throw new Error('原标签页丢失，且本轮尚无持久化对话地址，无法确认发送状态');
+  if(command.recover && !command.session.conversationUrl && command.job.checkpoint?.phase!=='preparing')throw new Error('原标签页丢失，且本轮尚无持久化对话地址，无法确认发送状态');
   const tab=await chrome.tabs.create({url:command.session.conversationUrl || 'https://gemini.google.com/app',active:false});
   if(!tab.id)throw new Error('无法创建 Gemini 标签页');
   await chrome.storage.local.set({[key]:tab.id});await activateWorkerTab(tab.id);return tab.id;
@@ -117,17 +123,44 @@ async function run(command:RunCommand,config:Settings) {
   try {
     await chrome.storage.local.set({activeJob:{id:command.job.id,model:command.session.model,state:command.recover?'恢复查询':'准备发送'}});
     if(cancelled.has(command.job.id))throw new Error('任务已取消');
+    const cached=(await chrome.storage.local.get<Record<string,{outcome?:Outcome}|undefined>>('job:'+command.job.id))['job:'+command.job.id]?.outcome;
+    if(cached && 'result' in cached){outcome=cached;}else{
     const tabId=await getTab(command);
     if(cancelled.has(command.job.id)){await chrome.tabs.remove(tabId).catch(()=>{});throw new Error('任务已取消');}
-    let loaded=false;
-    for(let i=0;i<80;i++){
-      try {const res=await chrome.tabs.sendMessage(tabId,{type:'ping'});if(res?.ok){loaded=true;break;}}catch{if(i===0)await chrome.scripting.executeScript({target:{tabId},files:['content.js']}).catch(()=>{});}
-      await new Promise(r=>setTimeout(r,250));
-    }
-    if(!loaded)throw new Error('Gemini 页面脚本未就绪；若安装插件前已打开此页，请刷新该页');
-    if(cancelled.has(command.job.id))throw new Error('任务已取消');
-    outcome=await chrome.tabs.sendMessage(tabId,{type:'run',command,target:config.labels[command.session.model] || command.session.model});
+    const waitReady=async()=>{
+      for(let i=0;i<80;i++){
+        if(cancelled.has(command.job.id))throw new Error('任务已取消');
+        try {const res=await bounded(chrome.tabs.sendMessage(tabId,{type:'ping'}),1000);if(res?.ok)return;}catch{if(i===0)await chrome.scripting.executeScript({target:{tabId},files:['content.js']}).catch(()=>{});}
+        await new Promise(r=>setTimeout(r,250));
+      }
+      throw new Error('Gemini 页面脚本未就绪');
+    };
+    outcome=await runWithRecovery(command,{
+      checkpoint:async()=>{const key='job:'+command.job.id;const values=await chrome.storage.local.get<Record<string,{checkpoint?:Checkpoint}|undefined>>(key);return values[key]?.checkpoint || command.job.checkpoint || undefined;},
+      persist:async(checkpoint:Checkpoint)=>{
+        if(cancelled.has(command.job.id))throw new Error('任务已取消');
+        await chrome.storage.local.set({['job:'+command.job.id]:{checkpoint}});
+        const latest=commands.get(command.job.id) || command;
+        await acknowledged({type:'progress',jobId:command.job.id,attempt:latest.job.attempt,checkpoint,state:checkpoint.phase});
+      },
+      reload:async()=>{
+        if(cancelled.has(command.job.id))throw new Error('任务已取消');
+        const tab=await chrome.tabs.get(tabId);
+        const expected=command.session.conversationUrl || command.job.checkpoint?.conversationUrl;
+        if(expected && tab.url?.split(/[?#]/)[0]!==expected)throw new Error('原标签页已离开会话，停止刷新');
+        await chrome.tabs.reload(tabId);
+        // Wait for the new document, not a ping from the old content script.
+        await new Promise(r=>setTimeout(r,500));
+        for(let i=0;i<80;i++){if((await chrome.tabs.get(tabId)).status==='complete')break;await new Promise(r=>setTimeout(r,250));}
+      },
+      execute:async current=>{
+        await waitReady();
+        if(cancelled.has(command.job.id))throw new Error('任务已取消');
+        return bounded(chrome.tabs.sendMessage(tabId,{type:'run',command:current,target:config.labels[command.session.model] || command.session.model}),current.job.deadline-Date.now()+1000);
+      }
+    });
     if(!outcome)throw new Error('页面连接中断，结果未知');
+    }
   } catch(e){outcome={state:'unknown',error:{code:'page_unavailable',message:(e as Error).message}};}
   const latest=commands.get(command.job.id) || command;
   try{await acknowledged({type:'outcome',jobId:command.job.id,attempt:latest.job.attempt,outcome});}

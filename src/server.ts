@@ -1,3 +1,4 @@
+import {recoveryAdvice} from './recovery.js';
 import { landing } from './landing.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
@@ -5,7 +6,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { z } from 'zod';
 import { ApiError, Store } from './store.js';
 import { MAX_FILE_BYTES, MAX_ATTACHMENTS, MODELS, THINKING_LEVELS, type Job, isActive } from './protocol.js';
-const checkpointSchema = z.object({phase:z.enum(['preparing','dispatching','submitted']),beforeUsers:z.array(z.string()),beforeReplies:z.array(z.string()),prompt:z.string(),conversationUrl:z.string().nullable(),modelLabel:z.string(),thinkingLabel:z.string().optional(),updatedAt:z.number(),upload:z.object({ids:z.array(z.string()).max(MAX_ATTACHMENTS),state:z.enum(['uploading','ready'])}).optional()});
+const checkpointSchema = z.object({recovery:z.object({refreshes:z.number().int().min(0).max(2),resetUpload:z.boolean()}).optional(),phase:z.enum(['preparing','dispatching','submitted']),beforeUsers:z.array(z.string()),beforeReplies:z.array(z.string()),prompt:z.string(),conversationUrl:z.string().nullable(),modelLabel:z.string(),thinkingLabel:z.string().optional(),updatedAt:z.number(),upload:z.object({ids:z.array(z.string()).max(MAX_ATTACHMENTS),state:z.enum(['uploading','ready'])}).optional()});
 const resultSchema = z.object({text:z.string().min(1),requestedModel:z.enum(MODELS),observedModelLabel:z.string(),modelVerified:z.boolean(),requestedThinkingLevel:z.enum(THINKING_LEVELS),observedThinkingLabel:z.string(),thinkingVerified:z.boolean(),conversationUrl:z.string(),completedAt:z.number()});
 const outcomeSchema = z.union([
   z.object({result:resultSchema,checkpoint:checkpointSchema.optional()}),
@@ -49,33 +50,38 @@ export function createBridge(store:Store,token:string) {
         res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Length':file.size,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});
         res.end(store.fileBytes(file.id));return;
       }
-      if(req.method==='GET' && path==='/api/health') return send(res,200,{ok:true,browserConnected:!!connection,browserId:connection?.browserId || null,extensionVersion:connection?.version || null,activeJobId:inFlight,blockedJobs:store.jobs().filter(j=>['unknown','blocked_login'].includes(j.state)).map(j=>({id:j.id,state:j.state})),models,modelsUpdatedAt});
+      if(req.method==='GET' && path==='/api/health') return send(res,200,{ok:true,browserConnected:!!connection,browserId:connection?.browserId || null,extensionVersion:connection?.version || null,activeJobId:inFlight,blockedJobs:store.jobs().filter(j=>['unknown','blocked_login'].includes(j.state)).map(j=>({id:j.id,state:j.state,error:j.error,recovery:recoveryAdvice(j)})),models,modelsUpdatedAt});
       if(req.method==='POST' && path==='/api/dev/reload-extension') {
         if(!connection)throw new ApiError('browser_offline','插件尚未连接',503);
         if(inFlight)throw new ApiError('browser_busy','任务正在执行，不能重新加载插件',409);
         connection.ws.send(JSON.stringify({type:'reload'}));return send(res,200,{requested:true});
       }
       if(req.method==='POST' && path==='/api/browser/inspect') {
+        const input=z.object({selections:z.array(z.object({model:z.enum(MODELS),thinkingLevel:z.enum(THINKING_LEVELS)})).max(12).default([])}).parse(await body(req));
         if(!connection)throw new ApiError('browser_offline','插件尚未连接',503);
         if(inFlight || store.jobs().some(j=>['unknown','blocked_login'].includes(j.state)))throw new ApiError('browser_busy','先处理当前任务，再检查网页控件',409);
         const controlId=crypto.randomUUID();
         const data=await new Promise<unknown>((resolve,reject)=>{
-          const timer=setTimeout(()=>{controls.delete(controlId);reject(new ApiError('inspect_timeout','读取网页控件超时；更新插件后请刷新 Gemini 页面',504));},40000);
-          controls.set(controlId,{resolve,reject,timer});connection!.ws.send(JSON.stringify({type:'inspect',controlId}));
+          const timer=setTimeout(()=>{controls.delete(controlId);reject(new ApiError('inspect_timeout','读取网页控件超时；更新插件后请刷新 Gemini 页面',504));},90000);
+          controls.set(controlId,{resolve,reject,timer});connection!.ws.send(JSON.stringify({type:'inspect',controlId,selections:input.selections}));
         });
         return send(res,200,data);
       }
       if(req.method==='GET' && path==='/api/models') return send(res,200,{requestedModels:MODELS,options:models,verified:modelsUpdatedAt!==null,updatedAt:modelsUpdatedAt});
       if(req.method==='GET' && path==='/api/sessions') return send(res,200,store.sessions());
       if(req.method==='POST' && path==='/api/sessions') {
-        const input=z.object({model:z.enum(MODELS).default('3.1 pro'),thinking_level:z.enum(THINKING_LEVELS).default('medium'),label:z.string().max(200).default(''),conversation_url:z.string().optional()}).parse(await body(req));
+        const input=z.object({model:z.enum(MODELS).default('3.1 pro'),thinking_level:z.enum(THINKING_LEVELS).default('high'),label:z.string().max(200).default(''),conversation_url:z.string().optional()}).parse(await body(req));
         return send(res,201,store.createSession(input.model,input.label,input.conversation_url,input.thinking_level));
       }
       let match=path.match(/^\/api\/sessions\/([^/]+)$/);
       if(req.method==='GET' && match) return send(res,200,store.session(match[1]));
+      if(req.method==='PATCH' && match){
+        const input=z.object({expected_revision:z.number().int().min(0),model:z.enum(MODELS).optional(),thinking_level:z.enum(THINKING_LEVELS).optional()}).refine(v=>v.model!==undefined || v.thinking_level!==undefined).parse(await body(req));
+        return send(res,200,store.updateSession(match[1],input.expected_revision,input.model,input.thinking_level));
+      }
       match=path.match(/^\/api\/sessions\/([^/]+)\/jobs$/);
       if(req.method==='POST' && match) {
-        const input=z.object({attachment_ids:z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(MAX_ATTACHMENTS).default([]),request_id:z.string().min(1).max(200).optional(),prompt:z.string().trim().min(1).max(200_000),expected_revision:z.number().int().min(0),timeout_ms:z.number().int().min(10_000).max(1_800_000).default(600_000)}).parse(await body(req));
+        const input=z.object({attachment_ids:z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(MAX_ATTACHMENTS).default([]),request_id:z.string().min(1).max(200).optional(),prompt:z.string().trim().min(1).max(200_000),expected_revision:z.number().int().min(0),timeout_ms:z.number().int().min(10_000).max(1_800_000).optional()}).parse(await body(req));
         const header=req.headers['idempotency-key'];
         if(typeof header==='string' && input.request_id && header!==input.request_id) throw new ApiError('idempotency_conflict','请求头和请求体 request_id 不一致',409);
         const key=z.string().min(1).max(200).parse(header || input.request_id);
@@ -87,7 +93,7 @@ export function createBridge(store:Store,token:string) {
         const wait=z.coerce.number().int().min(0).max(20_000).parse(url.searchParams.get('wait_ms') || 0);
         let job=store.job(match[1]); const until=Date.now()+wait;
         while((job.state==='queued'||isActive(job.state)) && Date.now()<until && !res.destroyed && !stopped) {await new Promise(r=>setTimeout(r,250));job=store.job(match[1]);}
-        return send(res,200,job);
+        return send(res,200,{...job,recovery:recoveryAdvice(job)});
       }
       match=path.match(/^\/api\/jobs\/([^/]+)\/cancel$/);
       if(req.method==='POST' && match){
@@ -119,7 +125,7 @@ export function createBridge(store:Store,token:string) {
         const job=store.retryMissing(match[1],input.request_id);send(res,202,job);schedule();return;
       }
       match=path.match(/^\/api\/jobs\/([^/]+)\/resume$/);
-      if(req.method==='POST' && match) { const job=store.resume(match[1]);send(res,200,job);schedule();return; }
+      if(req.method==='POST' && match) { const input=z.object({refresh:z.boolean().default(false)}).parse(await body(req));const job=store.resume(match[1],input.refresh);send(res,200,job);schedule();return; }
       throw new ApiError('not_found','接口不存在',404);
     } catch(e) {
       if(e instanceof z.ZodError) return send(res,400,{error:{code:'invalid_input',message:e.issues.map(i=>`${i.path.join('.')}: ${i.message}`).join('; ')}});
@@ -137,6 +143,7 @@ export function createBridge(store:Store,token:string) {
     let browserId:string|null=null;
     const timeout=setTimeout(()=>ws.close(1008,'Authentication timeout'),5000);
     ws.on('message',raw=>{
+      if(stopped)return;
       try {
         const msg=JSON.parse(raw.toString());
         if(!browserId) {
@@ -168,7 +175,7 @@ export function createBridge(store:Store,token:string) {
         }
       } catch(e) {ws.send(JSON.stringify({type:'error',message:e instanceof Error?e.message:'Invalid message'}));}
     });
-    ws.on('close',()=>{clearTimeout(timeout);if(connection?.ws===ws){if(inFlight){const job=store.job(inFlight);if(isActive(job.state))store.patchJob(inFlight,{state:'reconciling'});}connection=null;inFlight=null;models=[];modelsUpdatedAt=null;for(const p of controls.values()){clearTimeout(p.timer);p.reject(new ApiError('browser_offline','浏览器连接中断',503));}controls.clear();}});
+    ws.on('close',()=>{clearTimeout(timeout);if(connection?.ws===ws){if(inFlight && !stopped){const job=store.job(inFlight);if(isActive(job.state))store.patchJob(inFlight,{state:'reconciling'});}connection=null;inFlight=null;models=[];modelsUpdatedAt=null;for(const p of controls.values()){clearTimeout(p.timer);p.reject(new ApiError('browser_offline','浏览器连接中断',503));}controls.clear();}});
     ws.on('error',()=>{});
   });
   function schedule() {
@@ -202,5 +209,5 @@ export function createBridge(store:Store,token:string) {
     schedule();
   },1000);
   interval.unref();
-  return {server,store, async close(){stopped=true;clearInterval(interval);for(const ws of wss.clients)ws.terminate();await new Promise<void>(r=>server.close(()=>r()));wss.close();}};
+  return {server,store, async close(){stopped=true;clearInterval(interval);for(const ws of wss.clients)ws.terminate();await new Promise<void>(r=>server.close(()=>r()));await new Promise<void>(r=>wss.close(()=>r()));}};
 }

@@ -2,7 +2,7 @@ import { conversationUrl, type ModelOption } from '../src/protocol';
 export class PageError extends Error {constructor(public code:string,message:string){super(message);}}
 export const pause=(ms:number)=>new Promise<void>(r=>setTimeout(r,ms));
 export const normalized=(s:string)=>s.replace(/\u00a0/g,' ').replace(/\s+/g,' ').trim();
-function visible(el:Element) {return el.getClientRects().length>0 && getComputedStyle(el).visibility!=='hidden';}
+function visible(el:Element) {return !el.closest('[data-visible="false"], [hidden]') && el.getClientRects().length>0 && getComputedStyle(el).visibility!=='hidden';}
 function all(selector:string) {return Array.from(document.querySelectorAll<HTMLElement>(selector)).filter(visible);}
 function label(el:Element) {return normalized(`${el.getAttribute('aria-label') || ''} ${(el as HTMLElement).innerText || el.textContent || ''}`);}
 export function currentUrl() {try{return conversationUrl(location.href);}catch{return null;}}
@@ -12,23 +12,38 @@ export function editor() {
   return candidates[0] || null;
 }
 export function generating() {return all('button').some(e=>/停止生成|停止回答|停止回复|stop (generating|response|responding)/i.test(label(e)) || e.getAttribute('data-test-id')==='stop-button');}
-function picker() {return all('[data-test-id="bard-mode-menu-button"], button[aria-haspopup]').find(e=>e.getAttribute('data-test-id')==='bard-mode-menu-button' || /模式|模型|model|mode selector/i.test(label(e))) || null;}
+function picker() {const el=all('[data-test-id="bard-mode-menu-button"], button[aria-haspopup]').find(e=>e.getAttribute('data-test-id')==='bard-mode-menu-button' || /模式|模型|model|mode selector/i.test(label(e)));return el?.querySelector<HTMLElement>('button') || el || null;}
 export function currentModel() {const el=picker();return el?label(el):'';}
 export function matchesModel(labelText:string,target:string) {
   const normalize=(v:string)=>v.toLowerCase().replace(/[“”"'()（）,:：]/g,' ').replace(/\s+/g,' ').trim();
   const actual=normalize(labelText),expected=normalize(target);
   return expected.length>0 && (` ${actual} `).includes(` ${expected} `);
 }
-function modelOptions() {return all('[role="menuitem"], [role="menuitemradio"], [role="option"], [role="radio"], button[mat-menu-item], .mat-mdc-menu-panel button, [role="menu"] button');}
-function menuOpen(){return all('[data-test-id="gem-mode-menu"], [role="menu"]').length>0;}
-async function openModelMenu(){
-  const button=picker();if(!button)throw new PageError('adapter_incompatible','找不到模型选择器');
-  if(!menuOpen()){button.click();await pause(350);}
-  return modelOptions();
+const optionSelector='[role="menuitem"], [role="menuitemradio"], [role="option"], [role="radio"], button[mat-menu-item]';
+function modelMenu(){
+  const id=picker()?.getAttribute('aria-controls');const controlled=id?document.getElementById(id):null;
+  if(controlled && visible(controlled))return controlled;
+  return all('[data-test-id="gem-mode-menu"], [role="menu"], [role="listbox"]').find(e=>e.getAttribute('data-test-id')==='gem-mode-menu' || e.querySelector('[data-mode-id]') || /3\.1\s*pro|4\s*argon/i.test(label(e)));
 }
-function closeMenus(){
-  for(let i=0;i<2;i++)(document.activeElement || document).dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));
+function modelOptions() {const root=modelMenu();return root?Array.from(root.querySelectorAll<HTMLElement>(optionSelector)).filter(e=>visible(e) && e.closest('[role="menu"], [role="listbox"]')===root):[];}
+function menuOpen(){return !!modelMenu();}
+async function until<T>(read:()=>T|undefined,code:string,message:string):Promise<T>{
+  const deadline=Date.now()+4000;
+  do {const value=read();if(value!==undefined)return value;await pause(100);}while(Date.now()<deadline);
+  throw new PageError(code,message);
+}
+async function openModelMenu(){
+  const button=await until(()=>picker() || undefined,'adapter_incompatible','找不到模型选择器');
+  if(!menuOpen())button.click();
+  return until(()=>{const items=modelOptions();return items.length?items:undefined;},'adapter_incompatible','模型菜单未就绪');
+}
+async function closeMenus(){
+  for(let i=0;i<2 && menuOpen();i++){
+    (document.activeElement || document).dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));
+    await pause(150);
+  }
   if(menuOpen())picker()?.click();
+  await until(()=>menuOpen()?undefined:true,'adapter_incompatible','模型菜单未关闭');
 }
 export async function listModels():Promise<ModelOption[]> {
   const alreadyOpen=menuOpen();
@@ -36,10 +51,11 @@ export async function listModels():Promise<ModelOption[]> {
     const options=(await openModelMenu()).filter(e=>e.hasAttribute('data-mode-id') || (!e.closest('[data-visible="false"]') && !/思考等级|thinking level/i.test(label(e)))).map(e=>({label:label(e),available:e.getAttribute('aria-disabled')!=='true' && !(e as HTMLButtonElement).disabled})).filter(o=>o.label);
     if(!options.length)throw new PageError('adapter_incompatible','未识别到模型列表，请反馈网页实际控件');
     return [...new Map(options.map(o=>[o.label,o])).values()];
-  } finally {if(!alreadyOpen)closeMenus();}
+  } finally {if(!alreadyOpen)await closeMenus();}
 }
 export function matchesCurrentModel(value:string,target:string){
   if(matchesModel(value,target))return true;
+  if(/\d+(?:\.\d+)?\s*(?:pro|argon)/i.test(value))return false;
   const aliases:Record<string,string>={'3.1 pro':'Pro','4 argon':'Argon'};
   const alias=aliases[target.toLowerCase().trim()];return !!alias && matchesModel(value,alias);
 }
@@ -50,11 +66,11 @@ export async function selectModel(target:string) {
     const option=matches[0];
     if(option.getAttribute('aria-disabled')==='true' || (option as HTMLButtonElement).disabled)throw new PageError('model_unavailable',`模型「${target}」当前不可选`);
     if(selected(option))return label(option);
-    option.click();await pause(400);
-    const verified=(await openModelMenu()).find(e=>matchesModel(label(e),target) && selected(e));
-    if(!verified)throw new PageError('model_unverified',`已点击模型但无法验证选中项是「${target}」`);
+    option.click();await pause(200);
+    await openModelMenu();
+    const verified=await until(()=>modelOptions().find(e=>matchesModel(label(e),target) && selected(e)),'model_unverified',`已点击模型但无法验证选中项是「${target}」`);
     return label(verified);
-  } finally {closeMenus();}
+  } finally {await closeMenus();}
 }
 export function extractUserText(el:Element){
   const content=el.querySelector('.query-text, [data-test-id="user-query"]') || el;
@@ -132,19 +148,16 @@ async function openThinkingOptions(){
   await openModelMenu();
   const thinking=modelOptions().find(e=>e.getAttribute('value')==='thinking_level' || /思考等级|thinking level|reasoning effort/i.test(label(e)));
   if(!thinking)throw new PageError('thinking_unavailable','当前模型没有可识别的思考等级选项');
-  // Gemini renders its submenu eagerly and links it with aria-controls. Read that exact
-  // submenu, including when it is collapsed; a programmatic click must still be verified.
   const controlled=()=>{
     const id=thinking.getAttribute('aria-controls');const root=id?document.getElementById(id):null;
-    return root?Array.from(root.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemradio"], [role="option"]')):[];
+    return root?Array.from(root.querySelectorAll<HTMLElement>(optionSelector)).filter(visible):[];
   };
-  let items=controlled();
-  if(items.some(e=>thinkingMatch(label(e),'low')))return items;
+  if(controlled().length)return controlled();
   thinking.dispatchEvent(new MouseEvent('mouseenter',{bubbles:false}));
-  thinking.dispatchEvent(new PointerEvent('pointerenter',{bubbles:false,pointerType:'mouse'}));
-  thinking.click();await pause(350);items=controlled();
-  if(!items.some(e=>thinkingMatch(label(e),'low')))throw new PageError('adapter_incompatible','未识别到低、中、高思考等级选项');
-  return items;
+  if(typeof PointerEvent!=='undefined')thinking.dispatchEvent(new PointerEvent('pointerenter',{bubbles:false,pointerType:'mouse'}));
+  await pause(150);
+  if(!controlled().length)thinking.click();
+  return until(()=>{const items=controlled();return items.length?items:undefined;},'thinking_unavailable','思考等级子菜单未展开');
 }
 export async function selectThinking(level:string){
   try {
@@ -153,16 +166,16 @@ export async function selectThinking(level:string){
     const option=options[0];
     if(option.getAttribute('aria-disabled')==='true' || (option as HTMLButtonElement).disabled)throw new PageError('thinking_unavailable',`当前模型不能选择 ${level}`);
     if(selected(option))return label(option);
-    option.click();await pause(300);
+    option.click();await pause(200);
     // Reopen the controls and inspect the selected marker, rather than trusting a click.
-    const checked=(await openThinkingOptions()).find(e=>thinkingMatch(label(e),level) && selected(e));
-    if(!checked)throw new PageError('thinking_unverified',`已选择 ${level}，但尚不能确认网页选中状态`);
+    await openThinkingOptions();
+    const checked=await until(()=>Array.from(document.querySelectorAll<HTMLElement>(optionSelector)).find(e=>visible(e) && thinkingMatch(label(e),level) && selected(e)),'thinking_unverified',`已选择 ${level}，但尚不能确认网页选中状态`);
     return label(checked);
   } finally {
-    closeMenus();
+    await closeMenus();
   }
 }
-export async function inspectControls(){
+export async function inspectControls(selections:{model:string;thinkingLevel:string}[]=[]){
   const readyDeadline=Date.now()+18000;
   while(!picker() && !loginRequired() && Date.now()<readyDeadline)await pause(300);
   if(loginRequired())throw new PageError('login_required','诊断标签页尚未登录 Gemini');
@@ -174,10 +187,30 @@ export async function inspectControls(){
     modelHtml=overlay();
     try {thinking=(await openThinkingOptions()).map(e=>({label:label(e),checked:selected(e),html:e.outerHTML.slice(0,6000)}));}catch(e){thinkingError=(e as Error).message;}
     thinkingHtml=overlay();
-  } finally {closeMenus();}
+  } finally {await closeMenus();}
+  const checks:unknown[]=[];let restoreError='';
+  if(selections.length){
+    let originalModel='';let originalThinking='';
+    try {
+      originalModel=label((await openModelMenu()).find(selected)!);
+      const option=(await openThinkingOptions()).find(selected);
+      originalThinking=Object.keys(thinkingNames).find(level=>option && thinkingMatch(label(option),level)) || '';
+      await closeMenus();
+      for(const selection of selections){
+        try {const modelLabel=await selectModel(selection.model);const thinkingLabel=await selectThinking(selection.thinkingLevel);checks.push({...selection,ok:true,modelLabel,thinkingLabel,header:currentModel()});}
+        catch(e){checks.push({...selection,ok:false,error:(e as Error).message});}
+      }
+    } finally {
+      try{
+        if(originalModel)await selectModel(models.find(m=>m.label===originalModel)?.label || originalModel);
+        if(originalThinking)await selectThinking(originalThinking);
+        await closeMenus();
+      }catch(e){restoreError=(e as Error).message;}
+    }
+  }
   const composerHtml=editor()?.closest('input-container')?.outerHTML || editor()?.parentElement?.parentElement?.outerHTML;
   const uploadButton=all('button').find(e=>/上传和工具|上传文件|添加文件|upload files|add files|uploads and tools/i.test(label(e)));
   uploadButton?.click();await pause(300);
   const uploadHtml=overlay() + (document.querySelector('simplified-input-menu')?.outerHTML || '');
-  return {ok:true,models,currentModel:currentModel(),thinking,thinkingError,modelHtml,thinkingHtml,composerHtml,uploadHtml,fileInputs:Array.from(document.querySelectorAll('input[type=file]')).map(e=>e.outerHTML)};
+  return {ok:!restoreError,restoreError,checks,models,currentModel:currentModel(),thinking,thinkingError,modelHtml,thinkingHtml,composerHtml,uploadHtml,fileInputs:Array.from(document.querySelectorAll('input[type=file]')).map(e=>e.outerHTML)};
 }

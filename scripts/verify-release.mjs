@@ -33,6 +33,7 @@ let child,client;
 try{
   execFileSync('tar',['-xzf',archive,'-C',temp]);
   const runtime=join(temp,prefix);
+  if(!(await readFile(join(runtime,'skills/gemini-ui-design/SKILL.md'),'utf8')).trim())throw new Error('Release is missing the UI design skill');
   execFileSync('npm',['ci','--omit=dev','--no-audit','--no-fund'],{cwd:runtime,stdio:'inherit'});
   const probe=createServer();probe.listen(0,'127.0.0.1');await once(probe,'listening');const port=probe.address().port;await new Promise(r=>probe.close(r));
   const data=join(temp,'isolated-data');
@@ -53,7 +54,7 @@ try{
   client=new Client({name:'release-verifier',version:'1.0.0'});
   await client.connect(new StdioClientTransport({command:process.execPath,args:[join(runtime,'dist/mcp.js')],cwd:runtime,env,stderr:'pipe'}));
   const tools=await client.listTools();
-  if(!tools.tools.some(t=>t.name==='gemini_files_upload'))throw new Error('Release is missing attachment MCP tools');
+  for(const name of ['gemini_files_upload','gemini_session_update','gemini_job_inspect','gemini_job_resume'])if(!tools.tools.some(t=>t.name===name))throw new Error('Release is missing MCP tool: '+name);
   const status=await client.callTool({name:'gemini_status',arguments:{}});
   if(status.isError || !JSON.parse(status.content[0].text).ok)throw new Error('Release MCP cannot reach its service');
   if(client.getServerVersion()?.version!==version)throw new Error('Release MCP version mismatch');

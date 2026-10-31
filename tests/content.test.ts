@@ -85,3 +85,56 @@ describe('browser turn recovery',()=>{
  });
 
 });
+
+it('rebuilds missing unsent attachments after a persisted refresh, then sends exactly once',async()=>{
+ const {execute}=await import('../extension/content');const uploads=await import('../extension/attachments');
+ const c=command(true);const file={id:'file',name:'brief.txt',mimeType:'text/plain',size:2,sha256:'hash',createdAt:0};
+ c.job.attachments=[file];c.job.checkpoint={phase:'preparing',beforeUsers:[],beforeReplies:[],prompt:c.job.prompt,conversationUrl:c.session.conversationUrl,modelLabel:'Pro',upload:{ids:['file'],state:'uploading'},recovery:{refreshes:1,resetUpload:true},updatedAt:Date.now()};
+ const wrapper=document.createElement('input-container');document.body.append(wrapper);wrapper.append(document.querySelector('[role=textbox]')!);
+ const input=document.createElement('input');input.type='file';wrapper.append(input);
+ vi.spyOn(uploads,'attachmentFile').mockResolvedValue(new File(['UI'],'brief.txt'));
+ vi.spyOn(uploads,'fileInput').mockResolvedValue(input);
+ const attach=vi.spyOn(uploads,'attach').mockImplementation(()=>{wrapper.insertAdjacentHTML('beforeend','<gem-attachment><span class="gem-attachment-text">brief</span><span class="gem-attachment-extension-label">TXT</span></gem-attachment>');});
+ const click=vi.fn(()=>{document.body.insertAdjacentHTML('beforeend','<user-query><user-query-file-preview><div data-test-id="uploaded-file"><button aria-label="brief.txt"></button></div></user-query-file-preview><div class="query-text">Improve button spacing.</div></user-query><model-response><div class="markdown">Use 8px.</div><button aria-label="Copy"></button></model-response>');});
+ document.querySelector('[aria-label=Send]')!.addEventListener('click',click);
+ const pending=execute(c,'3.1 Pro');await vi.advanceTimersByTimeAsync(8000);const result=await pending;
+ expect('result' in result).toBe(true);expect(attach).toHaveBeenCalledTimes(1);expect(click).toHaveBeenCalledTimes(1);
+ expect((storage['job:job'] as {checkpoint:Checkpoint}).checkpoint.recovery).toEqual({refreshes:1,resetUpload:false});
+});
+it('waits for old history to load after refresh instead of treating it as a conflicting conversation',async()=>{
+ const {execute}=await import('../extension/content');const c=command(true);
+ c.job.checkpoint={phase:'submitted',beforeUsers:['Old question'],beforeReplies:['Old answer'],prompt:c.job.prompt,conversationUrl:c.session.conversationUrl,modelLabel:'Pro',thinkingLabel:'中',updatedAt:Date.now()};
+ const click=vi.fn();document.querySelector('[aria-label=Send]')!.addEventListener('click',click);
+ const pending=execute(c,'3.1 Pro');await vi.advanceTimersByTimeAsync(2000);
+ document.body.insertAdjacentHTML('beforeend','<user-query><div class="query-text">Old question</div></user-query><model-response><div class="markdown">Old answer</div></model-response><user-query><div class="query-text">Improve button spacing.</div></user-query><model-response><div class="markdown">Use 8px.</div><button aria-label="Copy"></button></model-response>');
+ await vi.advanceTimersByTimeAsync(5000);const result=await pending;expect('result' in result).toBe(true);expect(click).not.toHaveBeenCalled();
+});
+it('returns a recoverable stall before the total deadline without clicking send again',async()=>{
+ const {execute}=await import('../extension/content');const c=command(true);c.job.deadline=Date.now()+180000;
+ c.job.checkpoint={phase:'submitted',beforeUsers:[],beforeReplies:[],prompt:c.job.prompt,conversationUrl:c.session.conversationUrl,modelLabel:'Pro',thinkingLabel:'中',updatedAt:Date.now()};
+ document.body.insertAdjacentHTML('beforeend','<user-query><div class="query-text">Improve button spacing.</div></user-query>');
+ const click=vi.fn();document.querySelector('[aria-label=Send]')!.addEventListener('click',click);
+ const pending=execute(c,'3.1 Pro');await vi.advanceTimersByTimeAsync(93000);const result=await pending;
+ expect('error' in result && result.error.code).toBe('generation_stalled');expect(click).not.toHaveBeenCalled();
+});
+
+it('allows Argon high to think for five minutes and then completes the original turn',async()=>{
+ const {execute}=await import('../extension/content');const c=command(true);c.session.model='4 argon';c.session.thinkingLevel='high';c.job.deadline=Date.now()+1200000;
+ c.job.checkpoint={phase:'submitted',beforeUsers:[],beforeReplies:[],prompt:c.job.prompt,conversationUrl:c.session.conversationUrl,modelLabel:'4 Argon',thinkingLabel:'高',updatedAt:Date.now()};
+ document.querySelector('[aria-haspopup]')!.setAttribute('aria-label','打开模式选择器，当前模式为 4 Argon 高');document.querySelector('[aria-haspopup]')!.textContent='4 Argon 高';
+ document.body.insertAdjacentHTML('beforeend','<user-query><div class="query-text">Improve button spacing.</div></user-query>');
+ const click=vi.fn();document.querySelector('[aria-label=Send]')!.addEventListener('click',click);
+ let settled=false;const pending=execute(c,'4 Argon').then(result=>{settled=true;return result;});
+ await vi.advanceTimersByTimeAsync(301000);expect(settled).toBe(false);
+ document.body.insertAdjacentHTML('beforeend','<model-response><div class="markdown">Use 8px.</div><button aria-label="Copy"></button></model-response>');
+ await vi.advanceTimersByTimeAsync(4000);const result=await pending;expect('result' in result).toBe(true);expect(click).not.toHaveBeenCalled();
+});
+it('bounds Argon high inactivity at six minutes instead of waiting forever',async()=>{
+ const {execute}=await import('../extension/content');const c=command(true);c.session.model='4 argon';c.session.thinkingLevel='high';c.job.deadline=Date.now()+1200000;
+ c.job.checkpoint={phase:'submitted',beforeUsers:[],beforeReplies:[],prompt:c.job.prompt,conversationUrl:c.session.conversationUrl,modelLabel:'4 Argon',thinkingLabel:'高',updatedAt:Date.now()};
+ document.querySelector('[aria-haspopup]')!.setAttribute('aria-label','打开模式选择器，当前模式为 4 Argon 高');document.querySelector('[aria-haspopup]')!.textContent='4 Argon 高';
+ document.body.insertAdjacentHTML('beforeend','<user-query><div class="query-text">Improve button spacing.</div></user-query>');
+ let settled=false;const pending=execute(c,'4 Argon').then(result=>{settled=true;return result;});
+ await vi.advanceTimersByTimeAsync(359000);expect(settled).toBe(false);
+ await vi.advanceTimersByTimeAsync(3000);const result=await pending;expect('error' in result && result.error.code).toBe('generation_stalled');
+});

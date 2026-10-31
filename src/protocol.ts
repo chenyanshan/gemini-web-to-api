@@ -6,6 +6,8 @@ export const MODELS = ['3.1 pro', '4 argon'] as const;
 export type Model = typeof MODELS[number];
 export const THINKING_LEVELS = ['low', 'medium', 'high'] as const;
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
+export const defaultJobTimeout=(model:Model,level:ThinkingLevel)=>model==='4 argon' && level==='high'?1_200_000:600_000;
+export const generationIdleTimeout=(model:Model,level:ThinkingLevel)=>model==='4 argon' && level==='high'?360_000:90_000;
 export type JobState = 'queued' | 'preparing' | 'dispatching' | 'submitted' | 'streaming' | 'reconciling' | 'completed' | 'failed' | 'unknown' | 'blocked_login';
 export interface BridgeError { code: string; message: string }
 export interface Session {
@@ -13,6 +15,7 @@ export interface Session {
   revision: number; browserId: string | null; status: 'ready' | 'busy' | 'blocked'; createdAt: number;
 }
 export interface Checkpoint {
+  recovery?: { refreshes:number; resetUpload:boolean };
   phase: 'preparing' | 'dispatching' | 'submitted';
   upload?: { ids:string[]; state:'uploading'|'ready' };
   beforeUsers: string[]; beforeReplies: string[]; prompt: string;
@@ -25,7 +28,9 @@ export interface Result {
 export interface Job {
   id: string; sessionId: string; requestId: string; inputHash: string; prompt: string;
   attachments?: Attachment[];
+  model?: Model; thinkingLevel?: ThinkingLevel; refreshRequested?: boolean;
   expectedRevision: number; state: JobState; createdAt: number; updatedAt: number;
+  timeoutMs?: number;
   deadline: number; attempt: number; checkpoint: Checkpoint | null;
   result: Result | null; error: BridgeError | null; replacementJobId?: string;
 }

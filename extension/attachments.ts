@@ -6,17 +6,20 @@ export function cards(root:ParentNode|null=composer()):Element[] {
   return root?Array.from(root.querySelectorAll('gem-attachment, gem-media-attachment')):[];
 }
 function matches(card:Element,file:Attachment) {
+  const tracked=card.getAttribute('data-gemini-bridge-file-id');
+  if(tracked)return tracked===file.id;
   if(card.tagName.toLowerCase()==='gem-media-attachment')return file.mimeType.startsWith('image/') && !!card.querySelector('img');
   const text=normalized(card.querySelector('.gem-attachment-text')?.textContent || '');
   const ext=normalized(card.querySelector('.gem-attachment-extension-label')?.textContent || '').toLowerCase();
   const dot=file.name.lastIndexOf('.');
-  return text===file.name || (dot>0 && text===file.name.slice(0,dot) && ext===file.name.slice(dot+1).toLowerCase()) ||
+  return text===file.name || (dot>0 && text===file.name.slice(0,dot) && (ext===file.name.slice(dot+1).toLowerCase() || (!ext && !!card.querySelector('img[src*="/type/text/code"]')))) ||
     Array.from(card.querySelectorAll('img')).some(img=>img.getAttribute('alt')===file.name);
 }
 export function checkAttachments(files:Attachment[],root:ParentNode|null=composer(),requireReady=true) {
   const actual=cards(root);
   const images=files.filter(f=>f.mimeType.startsWith('image/'));
   if(actual.length!==files.length || actual.filter(c=>c.tagName.toLowerCase()==='gem-media-attachment').length!==images.length || files.filter(f=>!f.mimeType.startsWith('image/')).some(f=>actual.filter(c=>matches(c,f)).length!==1))return false;
+  if(actual.some(c=>c.tagName.toLowerCase()!=='gem-media-attachment' && files.filter(f=>matches(c,f)).length!==1))return false;
   if(!requireReady)return true;
   return actual.every(c=>!c.querySelector('[role="progressbar"], mat-spinner, mat-progress-spinner, [aria-busy="true"], .upload-error, .error') &&
     !/上传失败|无法上传|不支持|upload failed|unsupported|could not upload/i.test(c.textContent || ''));
@@ -24,12 +27,17 @@ export function checkAttachments(files:Attachment[],root:ParentNode|null=compose
 export function assertNoForeignAttachments(files:Attachment[]) {
   if(cards().some(c=>!files.some(f=>matches(c,f))))throw new PageError('attachment_conflict','输入区有其他附件，停止发送以免混入无关文件');
 }
-export async function waitAttachments(files:Attachment[],deadline:number) {
+export async function waitAttachments(files:Attachment[],deadline:number,pending?:{file:Attachment;before:Element[]}) {
   let stable=0;
   while(Date.now()<deadline){
     const failure=pageFailure();
     if(failure)throw new PageError('attachment_upload_failed',failure);
+    if(cards().some(c=>c.querySelector('.upload-error, .error') || /上传失败|无法上传|不支持|upload failed|unsupported|could not upload/i.test(c.textContent || '')))throw new PageError('attachment_upload_failed','附件上传失败，尝试刷新原页后重新准备');
     if(cards().length>files.length)throw new PageError('attachment_conflict','输入区出现额外附件，停止发送');
+    if(pending){
+      const added=cards().filter(c=>!pending.before.includes(c));
+      if(added.length===1 && matches(added[0],pending.file))added[0].setAttribute('data-gemini-bridge-file-id',pending.file.id);
+    }
     const button=sendButton();
     if(checkAttachments(files) && button && !button.disabled && button.getAttribute('aria-disabled')!=='true'){
       if(!stable)stable=Date.now();
@@ -37,7 +45,7 @@ export async function waitAttachments(files:Attachment[],deadline:number) {
     }else stable=0;
     await pause(300);
   }
-  throw new PageError('attachment_not_ready','附件缺失或上传尚未完成；未发送文字，也不会自动重复添加附件。可恢复原任务重新检查，或取消任务');
+  throw new PageError('attachment_not_ready','附件缺失或上传尚未完成；未发送文字，可刷新原页后核对并重新准备附件');
 }
 export async function verifyImageSnapshots(files:Attachment[]) {
   const images=files.filter(f=>f.mimeType.startsWith('image/'));
@@ -46,7 +54,7 @@ export async function verifyImageSnapshots(files:Attachment[]) {
   for(let i=0;i<images.length;i++){
     const src=previews[i].querySelector('img')?.getAttribute('src') || '';
     if(!src.startsWith('blob:https://gemini.google.com/'))throw new PageError('attachment_unverified','无法核对图片预览原始数据');
-    const response=await fetch(src);const bytes=await response.arrayBuffer();
+    const response=await fetch(src,{signal:AbortSignal.timeout(15000)});const bytes=await response.arrayBuffer();
     const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(n=>n.toString(16).padStart(2,'0')).join('');
     if(hash!==images[i].sha256)throw new PageError('attachment_conflict','图片预览与附件快照不一致');
   }
@@ -77,6 +85,7 @@ export async function attachmentFile(jobId:string,file:Attachment) {
 export function attach(input:HTMLInputElement,file:File) {
   if(!input.isConnected)throw new PageError('adapter_incompatible','上传控件已变化，请恢复原任务检查');
   const transfer=new DataTransfer();transfer.items.add(file);
+  input.value='';
   input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true}));
 }
 

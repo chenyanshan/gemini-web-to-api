@@ -22,6 +22,9 @@ try{
   for(const file of ['package.json','package-lock.json','README.md']){
     await cp(join(root,file),join(runtime,file));
   }
+  await cp(join(root,'skills'),join(runtime,'skills'),{recursive:true});
+  await mkdir(join(runtime,'docs'));
+  await cp(join(root,'docs/reliability-validation.md'),join(runtime,'docs/reliability-validation.md'));
   await cp(join(root,'docs/release-install.md'),join(runtime,'INSTALL.md'));
   // LICENSE is optional until the maintainer has chosen one.
   for(const file of (await readdir(root)).filter(f=>/^LICENSE(?:\..*)?$/.test(f))){

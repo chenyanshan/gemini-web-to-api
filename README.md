@@ -21,19 +21,22 @@ Google 登录、验证码、首次加载扩展和填写配对信息由我完成�
 我完成操作后，继续检查服务连接、网页模型和 MCP 工具；必要时提示我新开 Codex 会话。
 交付时说明安装路径、日常启动方法、实际验证结果及未完成步骤，不要把构建成功当作安装完成。
 
-安装后，仅在 UI 和前端设计问题上咨询 Gemini，拿到建议或代码后由你验证并继续工作。
-默认使用 3.1 pro、medium；复杂视觉设计或较大 UI 优化才考虑 4 argon，不自动切换模型。
+安装后，将 skills/gemini-ui-design 安装到本机的技能目录。前端或 UI 设计可交给 Gemini，
+支持上传现有界面截图与代码，要求它提供改造方案、完整代码或 HTML 示例，再由你实现和验证。
+正常请求使用 3.1 pro、high；困难任务、全局设计/重构，或多次重构仍不满意时使用 4 argon、high。
+4 argon、high 等待 3～5 分钟属正常，持续查询原任务，不因这段等待刷新或重发。
 需要截图、设计说明或代码参考时，用 gemini_files_upload 上传明确选定的文件，
 再通过 gemini_submit 的 attachment_ids 随提问发送，不上传无关文件。
 支持新建会话或绑定已有 Gemini 对话 URL；后续追问复用 session_id，并读取最新 revision。
 同一请求重试复用 request_id 和原附件，提交后保存 job_id 并查询到 completed。
-遇到卡顿或 unknown，先恢复核对原任务，不盲目刷新、重复发送或新建会话冒充恢复；
-只有我明确同意后，才重发已经确认在网页缺失的那一轮。
+遇到卡顿或 unknown，按 recovery 建议恢复原任务；上传失败或页面卡顿可用 resume(refresh=true)。
+刷新后先核对原轮，发送前可重建附件，发送后只读取原回复；每任务最多刷新两次。
+只有已授权重试且确认网页缺失的轮次才显式重发一次，不用新会话冒充恢复。
 ```
 
 把主 Chrome 中已登录的 Gemini 网页接入本地 HTTP API 和 Codex MCP。
 
-使用范围：**仅在 UI 和前端设计问题上调用 Gemini**。常规布局、组件、样式建议默认用 `3.1 pro`；复杂视觉设计或较大的 UI 优化可指定 `4 argon`。后端、API 和一般调试由 Codex 自己处理。不会自动切换模型。
+使用范围：**前端与 UI 设计、实现、改造和视觉优化**。可把现有界面截图和代码交给 Gemini，要求设计方案、组件代码或完整 HTML 示例，再在本地实现并验证。正常请求默认用 `3.1 pro + high`；困难任务、全局设计/重构，或多次重构仍不满意时使用 `4 argon + high`。由调用助手按此策略在原会话空闲时升级；连接或上传故障仍走原任务恢复。后端、API 和一般调试由 Codex 自己处理。
 
 ## 下载与安装方式
 
@@ -193,18 +196,20 @@ Codex 配置语法参考：[官方 MCP 文档](https://learn.chatgpt.com/docs/ex
 | `gemini_sessions_list` | 查找已经保存的 session_id |
 | `gemini_session_create` | 创建新会话或绑定已有对话 URL |
 | `gemini_session_get` | 获取会话模型、思考等级和 revision |
+| `gemini_session_update` | 在同一空闲会话切模型/思考等级，返回新 revision |
+| `gemini_job_inspect` | 读取原任务页状态与 DOM，诊断恢复失败 |
 | `gemini_files_upload` | 暂存指定路径的参考图片、文档或代码，返回附件 ID |
 | `gemini_submit` | 幂等提交，立即返回 job_id |
 | `gemini_job_get` | 查询同一任务，可等待最多 20 秒 |
 | `gemini_job_cancel` | 放弃卡住的任务，关闭专用标签页并释放队列 |
-| `gemini_job_resume` | 恢复 unknown / blocked_login 原任务，先对账 |
-| `gemini_job_retry_missing` | 用户明确同意后，重发已确认在网页缺失的那一轮 |
+| `gemini_job_resume` | 恢复 unknown / blocked_login 原任务；refresh=true 刷新原页再对账 |
+| `gemini_job_retry_missing` | 已获重试授权后，重发已确认在网页缺失的那一轮 |
 
 典型调用：
 
 ```jsonc
-// gemini_session_create：省略 model 默认 3.1 pro；思考等级默认 medium
-{"label":"设置页设计","model":"3.1 pro","thinking_level":"medium"}
+// gemini_session_create：省略 model 默认 3.1 pro；思考等级默认 high
+{"label":"设置页设计","model":"3.1 pro","thinking_level":"high"}
 
 // 也可导入已有网页对话，再使用返回的 id 继续
 {"label":"继续原设计","model":"4 argon","thinking_level":"high","conversation_url":"https://gemini.google.com/app/你的对话ID"}
@@ -216,7 +221,7 @@ Codex 配置语法参考：[官方 MCP 文档](https://learn.chatgpt.com/docs/ex
 {"job_id":"...","wait_ms":20000}
 ```
 
-思考等级可选 `low / medium / high`，对应低、中、高。模型与思考等级在创建会话时固定，发送前验证网页选中状态。切换模型时创建另一会话，并明确提供需要继承的背景。
+思考等级可选 `low / medium / high`，对应低、中、高。使用 `gemini_session_update`，传入 `session_id`、最新 `expected_revision` 以及 `model` / `thinking_level`，可在同一空闲会话切换并保留上下文。配置改变时 revision 增加 1；下一轮使用返回的新 revision。执行中或状态未明时拒绝切换。每轮保存模型/强度快照，旧请求重放不受后来切换影响；网页选中状态在发送前核验。
 
 Gemini 不会自动读取工作区或继承 Codex 的全部历史。调用方在 prompt 中说明设计目标，并可显式选择本地图片、文档或代码文件作为附件。
 
@@ -236,9 +241,13 @@ Gemini 不会自动读取工作区或继承 Codex 的全部历史。调用方在
 
 文件以不可变快照保存在本地 SQLite，内容、文件名和 MIME 相同的上传会去重。提交后修改原文件不会改变正在执行的任务；若要发送新版，重新上传并使用新的 request_id。重试原请求须复用原附件 ID、顺序和其余参数。
 
-插件逐个读取并校验附件 SHA-256，通过网页上传，等待预览就绪后才发送文字。断线恢复先检查原草稿；不会对已经记录上传意图的附件盲目再添加。若预览丢失或上传失败，原任务暂停；可用 `gemini_job_resume` 重新核对，或取消后处理文件并新建会话。已发送的原任务只核对网页消息，不重新上传。Gemini 可能转换已发送的图片，恢复核对以图片数量、文档名称、原提问及轮次为依据。
+插件逐个读取并校验附件 SHA-256，通过网页上传，等待预览就绪后才发送文字。断线恢复先检查原草稿；不会对已经记录上传意图的附件盲目再添加。若预览丢失或上传失败，先自动刷新一次原页；历史不变、仍处于发送前且刷新后附件为空时，重建原附件。仍失败可用 `gemini_job_resume(refresh=true)` 再核对，每任务最多刷新两次。已发送的原任务只核对网页消息，不重新上传。Gemini 可能转换已发送的图片，恢复核对以图片数量、文档名称、原提问及轮次为依据。
 
 继续同一 session 时通常无需重新附上旧文件；需要新增参考时，在新一轮附上新的 attachment_ids。新会话需重新提供需要的参考，可复用已暂存 ID。
+
+## 前端设计 skill
+
+仓库和 runtime 包提供 [`skills/gemini-ui-design/SKILL.md`](skills/gemini-ui-design/SKILL.md)。将整个 `gemini-ui-design` 目录复制到本机技能目录（Codex 默认 `~/.codex/skills/`），新会话即可发现。它覆盖从零设计、上传现有截图与代码后改造、索取 HTML/组件示例、连续追问与故障恢复。MCP 的使用说明保持相同范围。
 
 ## HTTP API
 
@@ -254,10 +263,12 @@ Gemini 不会自动读取工作区或继承 Codex 的全部历史。调用方在
 | `GET /api/sessions` | 已保存的会话 |
 | `POST /api/sessions` | `model?`, `thinking_level?`, `label?`, `conversation_url?` |
 | `GET /api/sessions/:id` | 当前会话与 revision |
+| `PATCH /api/sessions/:id` | `expected_revision`, `model?`, `thinking_level?` |
 | `POST /api/sessions/:id/jobs` | `request_id`, `prompt`, `expected_revision`, `timeout_ms?`, `attachment_ids?` |
 | `GET /api/jobs/:id?wait_ms=20000` | 查询任务 |
 | `POST /api/jobs/:id/cancel` | 放弃任务并关闭专用标签页 |
-| `POST /api/jobs/:id/resume` | 对账并继续等待原任务 |
+| `POST /api/jobs/:id/resume` | `refresh?`，对账并继续等待原任务 |
+| `GET /api/jobs/:id/browser-state` | 原页状态及 DOM 诊断 |
 | `POST /api/jobs/:id/retry-missing` | `request_id`, `acknowledge_duplicate_risk: true` |
 
 例如上传图片（令牌通过环境变量提供）：
@@ -282,17 +293,18 @@ curl --fail-with-body http://127.0.0.1:43123/api/files \
 - 发送前，本地服务必须确认检查点已经落库；未确认则不点击发送。
 - WebSocket 断线后有界指数退避重连；原任务进入 reconciling，恢复原标签页或原对话。
 - 已有本轮用户消息则继续读取本轮回复，不能重新发送。完整结果可以反复获取。
-- 任务等待超时不会自动刷新 Gemini，也不会自动降级模型。默认总期限 10 分钟，可配置 10 秒至 30 分钟。
+- 上传失败、控件暂时不可用或页面持续无回复进展时（`4 argon + high` 为 6 分钟，其他配置 90 秒），最多自动刷新一次原页；发送前重建草稿，发送后仅核对原轮。`resume(refresh=true)` 可再刷新一次，总上限两次，跨重启保留。`4 argon + high` 默认总期限 20 分钟，其他配置 10 分钟，可显式配置 10 秒至 30 分钟；不会自动降级模型。
+- 任务查询和 status 的阻塞项返回 `recovery`，明确建议继续查询、刷新恢复、检查原页或处理登录；达到恢复上限后报告具体错误，不无限轮询。
 - MCP 工具调用超时不取消任务。重试查询同一 job_id；提交请求丢响应时复用完全相同的 request_id 和参数。
 
 针对 4 argon 刷新后本轮消息消失的情况：
 
 1. 调用 `gemini_job_resume` 核对原对话。
 2. 若原对话只剩发送前历史，返回 `unknown` + `turn_missing`，并保留原始提问与发送记录。
-3. 用户明确同意重发后，调用 `gemini_job_retry_missing`，使用一个新的重试 request_id，并传 `acknowledge_duplicate_risk: true`。替代任务仍使用原会话、原模型、原提问和原附件快照。
+3. 用户已授权刷新重试或明确同意重发后，调用 `gemini_job_retry_missing`，使用一个新的重试 request_id，并传 `acknowledge_duplicate_risk: true`。替代任务仍使用原会话、原模型、原提问和原附件快照。
 4. 如果此重试调用本身超时，重复调用时复用同一个重试 request_id。旧任务的 replacementJobId 指向唯一替代任务。
 
-网页没有本轮消息，不能证明远端从未接收，也不能证明额度没有消耗，因此不自动重发。其他无法确认的任务保持 unknown，队列暂停，避免多个未完成生成互相干扰。若决定放弃，可用 `gemini_job_cancel` 关闭任务页并释放队列，再新建会话。取消后原会话暂停，因为其上游状态仍可能不确定。第一版对无法对账的任务采取保守暂停策略，不保证所有上游异常都能自动恢复。
+网页没有本轮消息，不能证明远端从未接收，也不能证明额度没有消耗，因此不自动重发。其他无法确认的任务保持 unknown，队列暂停，避免多个未完成生成互相干扰。若决定放弃，可用 `gemini_job_cancel` 关闭任务页并释放队列，再新建会话。取消后原会话暂停，因为其上游状态仍可能不确定。刷新次数耗尽、登录失效或历史冲突时仍需处理具体原因；上游异常无法保证全部自动恢复。
 
 不要手工操作插件创建的专用会话标签页。历史变化、额外消息或模型切换会触发冲突，而不是静默使用另一份上下文。原对话被删除、浏览器登录失效或网页结构变化时需要恢复环境后再查询。
 
@@ -331,11 +343,15 @@ npm run build
 
 ## 验证记录
 
-已在 macOS 的日常 Chrome 配置文件中读取到 3.1 Pro、4 Argon 以及低/中/高选项。3.1 pro + medium 已完成两轮真实 UI 问答，验证原会话上下文、代码块、同一请求结果重放，并在扩展重载和服务重启后恢复了原任务，没有重复发送第一轮提问。4 argon 尚未进行消耗额度的生成测试。图片 + TXT 混合附件已用 3.1 pro 完成同一会话两轮实测，正确读出文件校验码、按钮圆角及图片配色；上传准备中断和发送后检查中断均恢复了同一任务，没有重复发送。
+2026-10-31 已通过 65 项自动化测试、六种模型/强度控件组合，以及同一真实对话五轮截图＋HTML/CSS 上传与生成（包含 Argon）。上传卡住的原任务经刷新恢复后完成；最终页面恰有五轮，没有重复发送。详细证据与边界见 [可靠性验证记录](docs/reliability-validation.md)。
+
+已在 macOS 的日常 Chrome 配置文件中读取到 3.1 Pro、4 Argon 以及低/中/高选项。3.1 pro + medium 已完成两轮真实 UI 问答，验证原会话上下文、代码块、同一请求结果重放，并在扩展重载和服务重启后恢复了原任务，没有重复发送第一轮提问。图片 + TXT 混合附件已用 3.1 pro 完成同一会话两轮实测，正确读出文件校验码、按钮圆角及图片配色；上传准备中断和发送后检查中断均恢复了同一任务，没有重复发送。
 
 后台窗口可能暂停 Gemini 的回复动画，使正文已经出现而完成标记迟迟不更新。实际联调确认，将执行窗口置于前台可以恢复完成状态，因此插件在执行时会激活独立窗口。
 
 `node scripts/smoke-live.mjs --confirm-live` 会实际发送两轮 3.1 pro UI 提问；仅在明确需要时执行。中断后用 `--confirm-live --resume` 查询/恢复同一批任务，避免重复提问。
+
+`node scripts/smoke-reliability.mjs --confirm-live` 验证同一对话五轮 PNG + HTML/CSS 混合附件（包括同主名代码文件）、Pro → Argon → Pro 切换、三档思考强度、上下文校验码及 HTML/CSS 输出；包含一轮 Argon 生成。中断后加 `--resume` 继续原任务；`--retry-missing` 表示允许对核实缺失的轮次重发一次。
 
 `node scripts/smoke-attachments.mjs --confirm-live` 会上传自生成的 PNG 和 TXT 并实际发一轮 UI 验证提问。中断后加 `--resume` 查询原任务；若任务为 unknown，先使用 resume API 恢复。加 `--resume --followup` 可再验证同一会话的新一轮附件上传。
 
@@ -354,7 +370,7 @@ npm test
 npm run build
 ```
 
-`node scripts/inspect.mjs` 会使用临时 Gemini 标签页读取模型、思考等级和上传入口控件，不上传文件或发送提问。`--reload` 可在没有未完成任务时先重新加载开发版扩展。诊断 HTML 保存在 `.data/controls.json`，不包括聊天正文。
+`node scripts/inspect.mjs` 会使用临时 Gemini 标签页读取模型、思考等级和上传入口控件，不上传文件或发送提问。`--exercise` 验证 Pro/Argon × low/medium/high 六种切换，再恢复原设置。`--reload` 可在没有未完成任务时先重新加载开发版扩展。诊断 HTML 保存在 `.data/controls.json`，不包括聊天正文。
 
 网页 DOM 不是稳定接口。适配器识别不到控件时明确报错，不能据此宣称上游始终可用。网页选中项的验证也不代表能独立核实 Google 未公开的底层模型路由。
 

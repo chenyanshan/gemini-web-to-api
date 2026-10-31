@@ -17,13 +17,15 @@ it('exposes working MCP tools and forwards model/thinking configuration through 
  try {
   await client.connect(transport);
   const listed=await client.listTools();expect(listed.tools.map(t=>t.name)).toContain('gemini_job_resume');
-  const response=await client.callTool({name:'gemini_session_create',arguments:{label:'UI test',thinking_level:'high'}});
+  const response=await client.callTool({name:'gemini_session_create',arguments:{label:'UI test'}});
   const data=JSON.parse((response.content as {text:string}[])[0].text);expect(data.model).toBe('3.1 pro');expect(data.thinkingLevel).toBe('high');expect(data.revision).toBe(0);
+  const update=await client.callTool({name:'gemini_session_update',arguments:{session_id:data.id,expected_revision:0,model:'4 argon',thinking_level:'low'}});
+  expect(update.isError).toBe(false);const updated=JSON.parse((update.content as {text:string}[])[0].text);expect(updated).toMatchObject({model:'4 argon',thinkingLevel:'low',revision:1});
   const filePath=join(dir,'brief.txt');writeFileSync(filePath,'UI test fixture');
   const uploaded=await client.callTool({name:'gemini_files_upload',arguments:{paths:[filePath]}});
   expect(uploaded.isError).not.toBe(true);const files=JSON.parse((uploaded.content as {text:string}[])[0].text);
   expect(files.attachment_ids).toHaveLength(1);
-  const submit=await client.callTool({name:'gemini_submit',arguments:{session_id:data.id,request_id:'attachment-key',prompt:'UI',expected_revision:0,attachment_ids:files.attachment_ids}});
+  const submit=await client.callTool({name:'gemini_submit',arguments:{session_id:data.id,request_id:'attachment-key',prompt:'UI',expected_revision:1,attachment_ids:files.attachment_ids}});
   expect(submit.isError).not.toBe(true);const job=JSON.parse((submit.content as {text:string}[])[0].text);
   expect(job.attachments[0].name).toBe('brief.txt');
   expect(store.fileBytes(files.attachment_ids[0]).toString()).toBe('UI test fixture');

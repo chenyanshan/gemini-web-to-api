@@ -84,3 +84,8 @@ sha256sum -c SHA256SUMS.txt
 如果必须更换路径，需要更新 Codex MCP 的脚本路径；Chrome 重新加载不同路径的扩展可能产生不同的浏览器标识，已有会话可能无法继续恢复。
 
 当前发布流程只接受稳定的 `vX.Y.Z` 标签，不自动安装更新，也不提供 Chrome Web Store / CRX 更新服务。
+
+
+## 前端设计 skill
+
+runtime 包内的 `skills/gemini-ui-design/` 可复制到本机助手的技能目录（Codex 默认 `~/.codex/skills/`）。它覆盖前端/UI 设计、上传现有截图及代码后改造、索取完整 HTML 或组件实现、同上下文切模型/思考等级和卡顿恢复。已有同名 skill 时先比较差异再更新；新会话加载新版 skill 与 MCP 工具。

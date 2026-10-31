@@ -26,7 +26,10 @@ describe('local API and browser recovery',()=>{
  it('requires authentication, blocks webpage origins, and defaults new sessions to Pro',async()=>{
   const {url}=await setup();expect((await fetch(`${url}/api/health`)).status).toBe(401);
   expect((await fetch(`${url}/api/health`,{headers:{...headers,Origin:'https://evil.example'}})).status).toBe(403);
-  const created=await fetch(`${url}/api/sessions`,{method:'POST',headers,body:'{}'});expect(created.status).toBe(201);expect((await created.json()).model).toBe('3.1 pro');
+  const created=await fetch(`${url}/api/sessions`,{method:'POST',headers,body:'{}'});expect(created.status).toBe(201);expect(await created.json()).toMatchObject({model:'3.1 pro',thinkingLevel:'high'});
+  const argon=await(await fetch(`${url}/api/sessions`,{method:'POST',headers,body:JSON.stringify({model:'4 argon'})})).json();
+  const slow=await(await fetch(`${url}/api/sessions/${argon.id}/jobs`,{method:'POST',headers,body:JSON.stringify({request_id:'slow',prompt:'Global UI redesign',expected_revision:0})})).json();
+  expect(slow.thinkingLevel).toBe('high');expect(slow.deadline-slow.createdAt).toBe(1200000);
   const bad=await fetch(`${url}/api/sessions`,{method:'POST',headers,body:JSON.stringify({model:'anything'})});expect(bad.status).toBe(400);
  });
  it('executes, recovers after socket loss, and returns the same result for retries',async()=>{
@@ -42,7 +45,7 @@ describe('local API and browser recovery',()=>{
   ws.close();await once(ws,'close');
   const reconnect=new WebSocket(`ws://127.0.0.1:${port}/bridge`,{origin:'chrome-extension://'+'a'.repeat(32)});resource.ws=reconnect;await once(reconnect,'open');
   ready=next(reconnect,'ready');commandPromise=next(reconnect,'run');reconnect.send(JSON.stringify({type:'hello',token:'test-token',browserId:'a7c87420-35ae-411c-93b5-3cc6c63f3a38'}));await ready;const recovered=await commandPromise;expect(recovered.recover).toBe(true);expect(recovered.job.checkpoint).toEqual(cp);
-  ack=next(reconnect,'ack');reconnect.send(JSON.stringify({type:'outcome',jobId:job.id,attempt:recovered.job.attempt,eventId:'two',outcome:{result:{text:'Use spacing consistently.',requestedModel:'3.1 pro',observedModelLabel:'3.1 Pro',modelVerified:true,requestedThinkingLevel:'medium' as const,observedThinkingLabel:'中',thinkingVerified:true,conversationUrl:cp.conversationUrl,completedAt:Date.now()},checkpoint:cp}}));await ack;
+  ack=next(reconnect,'ack');reconnect.send(JSON.stringify({type:'outcome',jobId:job.id,attempt:recovered.job.attempt,eventId:'two',outcome:{result:{text:'Use spacing consistently.',requestedModel:'3.1 pro',observedModelLabel:'3.1 Pro',modelVerified:true,requestedThinkingLevel:'high' as const,observedThinkingLabel:'高',thinkingVerified:true,conversationUrl:cp.conversationUrl,completedAt:Date.now()},checkpoint:cp}}));await ack;
   const retry=await fetch(`${url}/api/sessions/${s.id}/jobs`,{method:'POST',headers,body:JSON.stringify(payload)});const cached=await retry.json();expect(cached.id).toBe(job.id);expect(cached.state).toBe('completed');expect(store.session(s.id).revision).toBe(1);
  });
  it('releases a blocked queue only after the extension confirms closing the cancelled task tab',async()=>{
@@ -56,4 +59,17 @@ describe('local API and browser recovery',()=>{
   const fresh=store.createSession('3.1 pro');expect(store.submit(fresh.id,'fresh','UI',0).state).toBe('queued');
  });
 
+});
+
+it('persists refresh intent across the API and websocket and returns recovery guidance',async()=>{
+ const {url,port,store,resource}=await setup();const browserId='a7c87420-35ae-411c-93b5-3cc6c63f3a38';
+ const s=store.createSession('3.1 pro');const j=store.submit(s.id,'recover','UI',0);store.dispatch(j.id,browserId);
+ const cp={phase:'preparing' as const,beforeUsers:[],beforeReplies:[],prompt:'UI',conversationUrl:null,modelLabel:'Pro',updatedAt:Date.now()};
+ store.checkpoint(j.id,cp,'preparing');store.finish(j.id,{state:'unknown',error:{code:'attachment_not_ready',message:'Upload stalled'}});
+ const current=await(await fetch(url+'/api/jobs/'+j.id,{headers})).json();expect(current.recovery).toMatchObject({action:'resume_with_refresh',refresh:true});
+ const ws=new WebSocket(`ws://127.0.0.1:${port}/bridge`,{origin:'chrome-extension://'+'a'.repeat(32)});resource.ws=ws;await once(ws,'open');const ready=next(ws,'ready');ws.send(JSON.stringify({type:'hello',token:'test-token',browserId}));await ready;
+ const run=next(ws,'run');const resumed=await fetch(url+'/api/jobs/'+j.id+'/resume',{method:'POST',headers,body:JSON.stringify({refresh:true})});expect(resumed.status).toBe(200);
+ const command=await run;expect(command.job.refreshRequested).toBe(true);
+ const ack=next(ws,'ack');ws.send(JSON.stringify({type:'progress',eventId:'refresh',jobId:j.id,attempt:command.job.attempt,state:'preparing',checkpoint:{...cp,recovery:{refreshes:1,resetUpload:true}}}));await ack;
+ expect(store.job(j.id).checkpoint?.recovery).toEqual({refreshes:1,resetUpload:true});expect(store.job(j.id).refreshRequested).toBe(false);
 });
